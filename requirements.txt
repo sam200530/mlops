@@ -1,0 +1,18 @@
+# Full training / research stack.
+#
+# XGBoost is deliberately absent — see docs/01_dataset_audit.md §10. LightGBM is
+# the boosted-tree implementation for this project; running both doubles tuning
+# cost for a number that changes no decision.
+
+-r requirements-api.txt
+
+# Tuning
+optuna==4.9.0
+
+# Analysis + plots (EDA, evaluation figures, SHAP plots)
+matplotlib>=3.8,<4
+seaborn>=0.13,<1
+
+# Notebook support (EDA only)
+jupyter>=1.0
+ipykernel>=6.29

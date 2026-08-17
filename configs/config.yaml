@@ -1,0 +1,40 @@
+# Project configuration. Values here are consumed by src/utils/config.py.
+# Rationale for the non-obvious choices lives in docs/01_dataset_audit.md.
+
+split:
+  # Chronological tail holdout. Verified feasible: TransactionDT is
+  # non-null, non-negative, already monotonic in file order, spans 182
+  # contiguous days with no missing day, and zero rows sit exactly on the
+  # 80th-percentile cut.
+  holdout_fraction: 0.20
+  validation_fraction: 0.20
+  # Purged forward-chaining CV inside the training period.
+  n_cv_folds: 5
+  # Gap between a fold's train edge and its validation start, in days. Must be
+  # >= the longest velocity look-back window (168 h = 7 d) so trailing
+  # aggregates cannot straddle the boundary.
+  purge_days: 7
+  strategy: temporal
+
+features:
+  # Decision: keep all 339 V columns for the baseline. Redundancy is removed
+  # later on the evidence of SHAP + validation, not on a prior guess.
+  keep_all_v_columns: true
+  velocity_windows_hours: [1, 24, 168]
+  frequency_encode_min_count: 2
+  anchor_d_columns: true
+
+train:
+  # PR-AUC, not ROC-AUC: at 3.4993% prevalence the 569,877 negatives swamp the
+  # FPR denominator, so ROC-AUC is insensitive to false-positive volume, which
+  # is the cost that dominates fraud review.
+  primary_metric: pr_auc
+  seed: 42
+  n_jobs: -1
+  optuna_trials: 25
+  optuna_timeout_seconds: 1800
+  calibrate: true
+
+serving:
+  risk_threshold_medium: 0.30
+  risk_threshold_high: 0.70

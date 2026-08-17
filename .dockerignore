@@ -1,0 +1,39 @@
+# Keep the build context small and the image free of data.
+# Note: data/ is excluded entirely — the model artifact is bind-mounted at run
+# time (see docker-compose.yml), not copied into the image.
+
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+data/
+models/
+mlruns/
+mlartifacts/
+reports/
+notebooks/
+docs/
+tests/
+scripts/
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+.env
+*.log
+*.parquet
+*.csv
+*.pkl
+*.db
+
+README.md
+requirements.txt
+requirements-dev.txt
