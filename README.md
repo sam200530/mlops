@@ -594,8 +594,19 @@ No MLflow server is required.
 8. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
    deployment.
 
-9. **Docker was not built in the development environment**, because Docker is not
-   installed there. The Dockerfile is written and the CI workflow builds and
+9. **The pinned dependency set differs slightly from the development environment.**
+   `requirements.txt` pins `scikit-learn==1.3.2` and `shap==0.46.0`; the reported
+   metrics were produced locally under `scikit-learn 1.2.2` and `shap 0.52.0`.
+   The development combination is not installable from scratch — shap 0.52
+   declares `numpy>=2`, contradicting the `numpy==1.26.4` pin, and scikit-learn
+   1.2.2 ships no CPython 3.12 wheel — so it was corrected for reproducibility
+   after CI surfaced it. The saved artifact contains exactly one scikit-learn
+   object (`IsotonicRegression`, the probability calibrator); loading it under
+   1.3.2 is a minor version step and expected to work, but has not been verified
+   on this machine.
+
+10. **Docker was not built in the development environment**, because Docker is not
+    installed there. The Dockerfile is written and the CI workflow builds and
    smoke-tests it, but the build has not been executed locally.
 
 ## Future Improvements
