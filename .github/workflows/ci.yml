@@ -4,9 +4,9 @@ name: CI
 #
 # The dataset is not available in CI (1.3 GB, Kaggle competition rules), so the
 # test suite runs entirely on schema-faithful synthetic fixtures — see
-# tests/conftest.py. That is a deliberate design constraint: the tests exercise
-# real code paths, including training a small LightGBM model and scoring it
-# through the API, without needing the data.
+# tests/conftest.py. That is a deliberate constraint: the tests exercise real
+# code paths, including training a small LightGBM model and scoring it through
+# the API, without needing the data.
 
 on:
   push:
@@ -38,10 +38,10 @@ jobs:
         run: pip install ruff==0.8.4
 
       - name: Ruff check
-        run: ruff check src api database scripts tests
+        run: ruff check src api scripts tests
 
       - name: Ruff format check
-        run: ruff format --check src api database scripts tests
+        run: ruff format --check src api scripts tests
 
   test:
     name: Unit tests
@@ -65,18 +65,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest
-        env:
-          ENABLE_PREDICTION_LOG: "false"
-          ENABLE_REDIS: "false"
-        run: pytest -q --cov=src --cov=api --cov=database --cov-report=term-missing
-
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: .coverage
-          if-no-files-found: ignore
+        run: pytest -q --cov=src --cov=api --cov-report=term-missing
 
   docker:
     name: Docker build + API smoke test
@@ -99,13 +88,9 @@ jobs:
 
       - name: Start container
         # No model artifact is mounted: CI has no trained model. The service is
-        # designed to start anyway and report degraded health, which is exactly
-        # what this smoke test asserts — a crash-loop here would be a real bug.
-        run: |
-          docker run -d --name fraud-api-ci -p 8000:8000 \
-            -e ENABLE_PREDICTION_LOG=false \
-            -e ENABLE_REDIS=false \
-            fraud-api:ci
+        # designed to start anyway and report degraded health, which is what this
+        # smoke test asserts — a crash-loop here would be a real bug.
+        run: docker run -d --name fraud-api-ci -p 8000:8000 fraud-api:ci
 
       - name: Wait for the service to respond
         run: |
@@ -124,20 +109,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "--- GET /health ---"
+          echo "--- GET /health (must report degraded without a model) ---"
           health=$(curl -fsS http://localhost:8000/health)
           echo "$health"
-          echo "$health" | grep -q '"status"' || { echo "no status field"; exit 1; }
-
-          echo "--- GET / ---"
-          curl -fsS http://localhost:8000/ | grep -q '"docs"'
+          echo "$health" | grep -q '"status":"degraded"'
+          echo "$health" | grep -q '"model_loaded":false'
 
           echo "--- GET /docs ---"
           curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8000/docs | grep -q 200
 
-          echo "--- GET /openapi.json (all endpoints registered) ---"
+          echo "--- all three routes registered in the OpenAPI spec ---"
           spec=$(curl -fsS http://localhost:8000/openapi.json)
-          for route in "/predict" "/predict/batch" "/explain" "/model-info" "/monitoring/metrics"; do
+          for route in "/health" "/predict" "/explain"; do
             echo "$spec" | grep -q "\"$route\"" || { echo "missing route $route"; exit 1; }
           done
 
@@ -145,14 +128,12 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
             -H 'Content-Type: application/json' \
             -d '{"transaction_amt": 100.0, "product_cd": "W"}')
-          echo "status=$code"
           [ "$code" = "503" ] || { echo "expected 503, got $code"; docker logs fraud-api-ci; exit 1; }
 
           echo "--- POST /predict with an invalid body must be 422 ---"
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
             -H 'Content-Type: application/json' \
             -d '{"transaction_amt": -5.0}')
-          echo "status=$code"
           [ "$code" = "422" ] || { echo "expected 422, got $code"; exit 1; }
 
           echo "All smoke tests passed"
@@ -164,12 +145,3 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f fraud-api-ci || true
-
-  compose-validate:
-    name: Validate docker-compose
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate compose file
-        run: docker compose -f docker-compose.yml config --quiet

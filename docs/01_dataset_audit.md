@@ -421,146 +421,130 @@ versus the time-aware scheme. That number is worth having in the README.
 
 ---
 
-## 10. Proposed architecture
+## 10. Architecture
+
+The architecture proposed during this audit included Redis-backed online feature
+serving, a PostgreSQL prediction log and an MLflow model registry. **Those were
+built and then removed.** The reasoning is kept rather than deleted, because the
+removal is itself an engineering decision:
+
+They were written but never exercised against live services. Unexercised
+infrastructure adds surface area, review burden and interview exposure without
+adding evidence, and it drew attention away from where this project's value
+actually sits — the validation and leakage work. Redis in particular was serving
+online velocity features; removing it is safe because `prepare()` computes
+velocity from the request itself, and a lone transaction correctly yields a
+zero-history state rather than a fabricated one.
+
+The final architecture:
 
 ```mermaid
 flowchart TB
     subgraph OFF["Offline — training (reproducible, seeded)"]
-        RAW["data/raw<br/>4 CSVs"] --> LOAD["src/data/loading<br/>chunked read, downcast,<br/>id-NN → id_NN"]
-        LOAD --> VAL["src/data/validation<br/>schema, dtypes, key uniqueness,<br/>row-count invariants"]
-        VAL --> JOIN["LEFT JOIN on TransactionID<br/>assert rows unchanged"]
-        JOIN --> SPLIT["src/data/splitting<br/>time-ordered train/val/holdout<br/>+ purged forward-chaining folds"]
-        SPLIT --> FE["src/features<br/>fit on train fold only"]
+        RAW["data/raw<br/>4 CSVs"] --> LOAD["src/data/loading<br/>streamed CSV→Parquet<br/>id-NN → id_NN · LEFT JOIN"]
+        LOAD --> VAL["src/data/validation<br/>keys · dtypes · chronology<br/>fail-loud invariants"]
+        VAL --> SPLIT["src/data/splitting<br/>20% chronological holdout<br/>+ purged forward-chaining folds"]
+        SPLIT --> FE["src/features<br/>prepare → fit → transform<br/>encoders refit per fold"]
         FE --> TRAIN["src/models<br/>LogReg · RandomForest · LightGBM"]
         TRAIN --> TUNE["Optuna<br/>bounded budget, PR-AUC objective"]
-        TUNE --> EVAL["src/evaluation<br/>model_comparison.csv<br/>holdout scored once"]
+        TUNE --> CAL["src/evaluation/calibration<br/>isotonic on validation fold"]
+        CAL --> EVAL["holdout scored ONCE<br/>reports/model_comparison.csv"]
         EVAL --> SHAP["src/explainability<br/>global + per-transaction SHAP"]
     end
 
-    subgraph TRACK["Tracking"]
-        MLF["MLflow<br/>params · PR-AUC/ROC-AUC · SHAP artifacts<br/>Model Registry + versions"]
-    end
+    MLF["MLflow<br/>local ./mlruns file store<br/>params · metrics · artifacts"]
     TRAIN -.-> MLF
     TUNE -.-> MLF
     EVAL -.-> MLF
-    SHAP -.-> MLF
 
     subgraph ON["Online — serving"]
-        MLF ==>|"load once at startup"| API["FastAPI<br/>/health /model-info<br/>/predict /predict/batch /explain"]
-        API --> RD[("Redis<br/>prediction cache<br/>rate limit<br/>metric counters")]
-        API --> PG[("PostgreSQL<br/>prediction log")]
+        ART["models/model_artifact.pkl<br/>model + pipeline + calibrator + threshold"]
+        ART ==>|"loaded once at startup"| API["FastAPI (single container)<br/>/health · /predict · /explain"]
     end
 
-    subgraph MON["Monitoring (simulated traffic)"]
-        SIM["scripts/simulate_traffic.py<br/>replays unlabeled test_* rows"] --> API
-        PG --> DRIFT["src/monitoring<br/>PSI / KS drift · data quality ·<br/>latency · score distribution"]
-        RD --> DRIFT
-        DRIFT --> REP["reports/monitoring/*"]
-    end
+    DRIFT["src/monitoring/drift<br/>PSI + KS vs the real test period"]
+    EVAL --> DRIFT
 ```
 
-**Component justifications — including what gets cut.**
+**Component decisions, including what was cut:**
 
-- **LightGBM as the primary model, and XGBoost removed.** Both are installed
-  (LightGBM 4.7.0, XGBoost 3.0.5) and both would land in the same accuracy
-  neighbourhood on tabular data. Running both doubles tuning cost and produces a
-  second number nobody acts on. LightGBM wins on this specific data: native
-  categorical handling (`ProductCD`, `card4/6`, `M*`, `id_12/15/16/…`), native
-  NaN routing (essential at 43% mean missingness in the `V` block), and speed at
-  590k × ~400. XGBoost is stated as a considered-and-rejected alternative, which
-  is more useful than a third row in a table.
-- **Random Forest is kept** as a genuine contrast — bagging vs boosting, and a
-  strong non-linear model that cannot exploit NaN structurally — with capped
-  depth and estimators so it finishes in reasonable time. Its documented job is
-  to answer "does boosting actually earn its complexity here?"
-- **Logistic Regression is kept** because a regularized linear model on imputed,
-  scaled, one-hot features is the floor any complex model must clear, and it
-  exposes how much of the signal is simply linear.
-- **Redis earns its place three ways**, none of them decorative: (1) idempotent
-  prediction caching keyed by a hash of the scored feature payload — payment
-  pipelines retry, and re-scoring an identical request wastes latency for a
-  deterministic answer; (2) per-key sliding-window **rate limiting**, which
-  cannot be done correctly in per-worker process memory once the API scales past
-  one worker; (3) in-memory **metric counters** for the monitoring endpoint, so
-  scraping request/latency/validation-failure counts does not issue a Postgres
-  aggregate on every poll. If a component cannot be defended this concretely it
-  does not ship.
-- **PostgreSQL** stores the prediction log — request id, timestamp, model
-  version, probability, risk level, latency, and only the *derived* metadata
-  needed for drift analysis. Raw card and identity values are deliberately not
-  persisted; the log carries hashed entity keys and feature summaries instead,
-  because a fraud service's own logs are a payment-data liability.
-- **MLflow is used for tracking and registry only.** `mlflow models serve` is
-  deliberately not used — it would duplicate the FastAPI layer while giving no
-  place for Pydantic validation, Redis, the prediction log, or `/explain`. The
-  API loads the model from the registry by version at startup.
+- **XGBoost — considered and rejected.** It and LightGBM land in the same accuracy
+  neighbourhood on tabular data, so running both doubles tuning cost to produce a
+  second number that changes no decision. LightGBM wins on *this* data
+  specifically: native categorical support (`ProductCD`, `card4/6`, `M1`–`M9`,
+  `id_12/15/16/…`), native NaN routing (essential at 43% mean missingness in the
+  V block), and speed at 590k × 530.
+- **Redis — built, then removed.** It served online velocity features, a
+  prediction cache and rate limiting. None was ever exercised against a live
+  server, and the model contract survives without it (see above).
+- **PostgreSQL — built, then removed.** Prediction logging is valuable in
+  production, but a schema that has never had a row inserted is a liability in a
+  portfolio, not an asset.
+- **MLflow — kept, but only as a local file store.** Tracking params, metrics and
+  artifacts to `./mlruns` costs nothing and is genuinely useful. The model
+  registry and `mlflow server` infrastructure were removed.
+- **`mlflow models serve` — never used.** It would duplicate the FastAPI layer
+  while leaving no place for Pydantic validation or `/explain`.
+- **SMOTE — rejected.** Interpolating between fraud rows across a ~530-column
+  space that is largely categorical and heavily missing does not produce plausible
+  transactions. Imbalance is handled by `scale_pos_weight` plus calibration.
 
 ---
 
-## 11. Proposed project directory structure
+## 11. Project directory structure
 
-Close to what you sketched, with the changes explained below.
+This section originally proposed a larger structure including Redis-backed online
+features, a PostgreSQL prediction log, an MLflow model registry and a
+multi-service Docker Compose stack. **All of that was subsequently removed.**
+
+The reason is recorded here rather than erased: those components were written but
+never exercised against live services, so they added surface area and interview
+exposure without adding evidence. The project's value is concentrated in the
+validation and leakage work, and infrastructure around it was diluting that. The
+final structure is:
 
 ```
-fraud-detection-platform/
-├── configs/
-│   ├── config.yaml               # paths, seed, split ratios, feature flags
-│   ├── model_lgbm.yaml           # per-model hyperparameter spaces
-│   └── monitoring.yaml           # drift thresholds, reference window
+fraud-detection/
+├── configs/config.yaml           split, features, training, serving, monitoring
 ├── data/
-│   ├── README.md                 # how to obtain; raw data never committed
-│   ├── raw/  interim/  processed/
+│   ├── README.md                 how to obtain; raw data never committed
+│   └── raw/ interim/ processed/
 ├── docs/
-│   ├── 01_dataset_audit.md       # this document
-│   └── 02_leakage_analysis.md    # Phase 3 output
-├── notebooks/
-│   └── 01_eda.ipynb              # imports from src/, defines nothing reusable
+│   ├── 01_dataset_audit.md       this document
+│   └── 02_leakage_analysis.md    Phase 3 output
+├── notebooks/01_eda.ipynb        imports from src/, defines nothing reusable
 ├── src/
-│   ├── utils/                    # paths.py, logging_config.py, config.py, seed.py
-│   ├── data/                     # loading.py, validation.py, preprocessing.py, splitting.py
-│   ├── features/                 # builders + FeaturePipeline (fit/transform)
-│   ├── models/                   # estimator factories, train loop, tuning
-│   ├── evaluation/               # metrics.py, compare.py, calibration.py, plots.py
-│   ├── explainability/           # shap_explainer.py
-│   └── monitoring/               # drift.py, data_quality.py, metrics_store.py
-├── api/
-│   ├── main.py  schemas.py  dependencies.py  errors.py  routers/
-├── database/
-│   ├── models.py  session.py  init.sql
-├── scripts/
-│   ├── inspect_dataset.py        # Phase 1 — written, run, output in reports/
-│   ├── build_dataset.py          # raw → interim → processed
-│   ├── train.py  evaluate.py  register_model.py
-│   ├── simulate_traffic.py       # replays unlabeled test_* rows at the API
-│   └── monitor.py
-├── tests/
-├── docker/                       # postgres init, mlflow image, entrypoints
-├── reports/                      # dataset_audit.{json,md}, figures/, monitoring/
+│   ├── utils/                    paths, config, logging, seed
+│   ├── data/                     schema, loading, validation, preprocessing, splitting
+│   ├── features/                 builders, velocity, aggregations, pipeline
+│   ├── models/                   estimators, training, tuning, artifact
+│   ├── evaluation/               metrics, calibration, compare, plots
+│   ├── explainability/           shap_explainer
+│   └── monitoring/               drift
+├── api/                          main, routes, schemas, dependencies, settings
+├── scripts/                      inspect_dataset, build_dataset, train, evaluate, monitor
+├── tests/                        5 modules
+├── reports/                      generated outputs, gitignored
 ├── .github/workflows/ci.yml
-├── Dockerfile  docker-compose.yml  .dockerignore
-├── requirements.txt  pyproject.toml  .env.example  .gitignore  README.md
+├── Dockerfile  .dockerignore
+└── requirements.txt  requirements-dev.txt  pyproject.toml  .env.example
 ```
 
-Deviations from the sketch, and why:
+Structural decisions that survived the simplification:
 
-- **`src/utils/`** added. Path resolution, logging, config loading, and seeding
-  are needed by every other package; without a shared home they get copy-pasted
-  and drift. `paths.py` derives everything from the repo root (overridable via
-  `FRAUD_PROJECT_ROOT`, which is how the container points at `/app`), so no
-  module ever contains an absolute path.
-- **`docs/`** added. The audit and the leakage analysis are deliverables in their
-  own right, and the README should link to them rather than absorb them.
-- **`reports/`** added, and gitignored except placeholders. Generated artifacts
-  are reproducible outputs, not source.
-- **`configs/` split per concern** rather than one `config.yaml`, so a tuning
-  run and a monitoring run do not touch the same file.
-- **`scripts/simulate_traffic.py`** added. Monitoring needs traffic; this
-  project has no users. The script replays real-but-unlabeled `test_*` rows
-  against the running API, which is both the honest demo and a genuine use for
-  the unlabeled test set.
-- **`api/routers/`** added. Five endpoints where `/explain` needs SHAP and
-  `/predict/batch` needs different validation would make a single `main.py` grow
-  monolithic.
+- **`src/utils/`** — path resolution, logging, config and seeding are needed by
+  every package; without a shared home they get copy-pasted and drift. `paths.py`
+  derives everything from the repo root (overridable via `FRAUD_PROJECT_ROOT`,
+  which is how the container points at `/app`), so no module contains an absolute
+  path.
+- **`docs/`** — the audit and the leakage analysis are deliverables in their own
+  right; the README links to them rather than absorbing them.
+- **`reports/`** — generated artifacts are reproducible outputs, not source, and
+  are gitignored.
+- **A single `configs/config.yaml`** — the earlier split into per-concern config
+  files created two places to look for one answer.
+- **`api/` as five flat modules** — with three endpoints, a `routers/` package was
+  ceremony.
 
 ---
 

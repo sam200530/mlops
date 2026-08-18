@@ -1,4 +1,4 @@
-"""Tests for drift detection, data quality and the metrics store."""
+"""Tests for PSI/KS drift detection."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.monitoring.data_quality import ReferenceProfile, check_quality, summarise_issues
 from src.monitoring.drift import (
     classify_psi,
     feature_drift,
@@ -14,7 +13,6 @@ from src.monitoring.drift import (
     prediction_drift,
     summarise,
 )
-from src.monitoring.metrics_store import MetricsStore
 
 
 class TestPSI:
@@ -96,78 +94,3 @@ class TestPredictionDrift:
         report = prediction_drift(reference, current)
         assert report["verdict"] == "significant"
         assert report["current_mean"] > report["reference_mean"]
-
-
-class TestDataQuality:
-    def test_flags_missing_and_unexpected_columns(self) -> None:
-        reference = pd.DataFrame({"a": [1.0, 2.0], "b": ["x", "y"]})
-        profile = ReferenceProfile.from_frame(reference)
-        current = pd.DataFrame({"a": [1.0], "c": [5.0]})
-        issues = check_quality(current, profile)
-        kinds = {issue.issue for issue in issues}
-        assert "missing_column" in kinds
-        assert "unexpected_column" in kinds
-
-    def test_flags_missing_rate_increase(self) -> None:
-        profile = ReferenceProfile.from_frame(pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]}))
-        current = pd.DataFrame({"a": [1.0, np.nan, np.nan, np.nan]})
-        issues = check_quality(current, profile)
-        assert any(issue.issue == "missing_rate_increase" for issue in issues)
-
-    def test_flags_out_of_range_values(self) -> None:
-        profile = ReferenceProfile.from_frame(pd.DataFrame({"a": [1.0, 2.0, 3.0]}))
-        current = pd.DataFrame({"a": [500.0] * 10})
-        issues = check_quality(current, profile)
-        assert any(issue.issue == "out_of_range" for issue in issues)
-
-    def test_flags_unseen_categories(self) -> None:
-        profile = ReferenceProfile.from_frame(pd.DataFrame({"c": ["a", "b", "a"]}))
-        current = pd.DataFrame({"c": ["zzz"] * 10})
-        issues = check_quality(current, profile)
-        assert any(issue.issue == "unseen_categories" for issue in issues)
-
-    def test_clean_data_produces_no_issues(self) -> None:
-        reference = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "c": ["x", "y", "x", "y"]})
-        profile = ReferenceProfile.from_frame(reference)
-        assert check_quality(reference.copy(), profile) == []
-
-    def test_profile_roundtrip(self, tmp_path) -> None:
-        reference = pd.DataFrame({"a": [1.0, 2.0], "c": ["x", "y"]})
-        profile = ReferenceProfile.from_frame(reference)
-        path = profile.save(tmp_path / "profile.json")
-        loaded = ReferenceProfile.load(path)
-        assert loaded.missing_rates == profile.missing_rates
-        assert loaded.numeric_ranges == profile.numeric_ranges
-
-    def test_summarise_issues_counts_severities(self) -> None:
-        profile = ReferenceProfile.from_frame(pd.DataFrame({"a": [1.0, 2.0]}))
-        summary = summarise_issues(check_quality(pd.DataFrame({"b": [1.0]}), profile))
-        assert summary["n_issues"] >= 1
-
-
-class TestMetricsStore:
-    def test_counters_and_reservoirs_accumulate(self) -> None:
-        store = MetricsStore(None)
-        store.increment("requests", 3)
-        store.increment("requests")
-        store.observe_latency(10.0)
-        store.observe_latency(20.0)
-        store.observe_score(0.9)
-
-        assert store.counters()["requests"] == 4
-        latency = store.latency_summary()
-        assert latency["count"] == 2
-        assert latency["mean"] == pytest.approx(15.0)
-        assert store.score_summary()["count"] == 1
-        assert store.backend == "in_memory_fallback"
-
-    def test_empty_summaries_are_nan_not_errors(self) -> None:
-        summary = MetricsStore(None).latency_summary()
-        assert summary["count"] == 0
-        assert np.isnan(summary["mean"])
-
-    def test_reset_clears_state(self) -> None:
-        store = MetricsStore(None)
-        store.increment("x")
-        store.reset()
-        assert store.counters() == {}

@@ -269,35 +269,27 @@ def _raw_column_names() -> list[str]:
 
 
 @pytest.fixture
-def api_client(trained_artifact, monkeypatch):
-    """TestClient with the model injected and external services disabled.
+def api_client(trained_artifact):
+    """TestClient with a real (small) trained model injected.
 
-    Postgres and Redis are switched off rather than mocked: the point of these
-    tests is the HTTP contract and the scoring path, and the code is written to
-    degrade cleanly without either, which this also verifies.
+    The model is injected rather than loaded from disk because CI has no trained
+    artifact. Everything downstream of that — validation, frame construction,
+    feature pipeline, model, SHAP — is the real code path.
     """
     from fastapi.testclient import TestClient
 
-    from api import dependencies
-    from api.routers import explain as explain_router
-    from api.velocity_store import VelocityStore
-    from src.monitoring.metrics_store import MetricsStore
+    from api import dependencies, routes
 
-    dependencies.state.settings.enable_prediction_log = False
-    dependencies.state.settings.enable_redis = False
     dependencies.state.artifact = trained_artifact
-    dependencies.state.redis_client = None
-    dependencies.state.velocity_store = VelocityStore(None)
-    dependencies.state.metrics = MetricsStore(None)
-    explain_router.reset_explainer()
+    dependencies.state.request_count = 0
+    routes.reset_explainer()
 
     from api.main import app
 
-    # Bypass the lifespan handler: state is already populated above, and running
-    # it would try to load a model artifact from disk that CI does not have.
+    # The lifespan handler runs and finds no artifact on disk; state is
+    # re-injected afterwards so the tests exercise a loaded model.
     with TestClient(app) as client:
         dependencies.state.artifact = trained_artifact
-        dependencies.state.velocity_store = VelocityStore(None)
         yield client
 
 

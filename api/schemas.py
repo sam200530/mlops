@@ -1,16 +1,11 @@
 """Pydantic request/response models.
 
-Design decision on the input contract: the trained model reads ~430 raw columns,
-and requiring all of them would make the API unusable. So the schema names the
-fields that carry most of the signal and are realistically available at
-authorisation time, and accepts the long tail (``C*``, ``D*``, ``M*``, ``V*``,
-``id_*``) through a single ``extra_features`` map.
-
-Anything the caller omits becomes NaN. That is a genuine capability rather than a
-shortcut: the model is a LightGBM trained on data that is 43% missing across the
-V block, so it routes missing values natively and degrades gracefully instead of
-failing. The response reports how many features were actually supplied, so a
-caller can see the completeness of the input that produced the score.
+Input contract: the trained model reads ~430 raw columns, and requiring all of
+them would make the API unusable. So the schema names the fields carrying most of
+the signal and accepts the long tail (``C*``, ``D*``, ``M*``, ``V*``, ``id_*``)
+through one ``extra_features`` map. Anything omitted becomes NaN, which the model
+routes natively — the response reports ``features_supplied`` so a caller can see
+how complete the input behind a score was.
 """
 
 from __future__ import annotations
@@ -53,10 +48,7 @@ class TransactionRequest(BaseModel):
         Field(
             default=None,
             ge=0,
-            description=(
-                "Seconds offset in the dataset's time base. Used for cyclical time "
-                "features and velocity windows. Defaults to the model's training cut."
-            ),
+            description="Seconds offset in the dataset time base; drives cyclical time features.",
         ),
     ]
 
@@ -73,7 +65,7 @@ class TransactionRequest(BaseModel):
     def _limit_extra_features(
         cls, value: dict[str, float | str | None]
     ) -> dict[str, float | str | None]:
-        """Bound the extra map so a request cannot carry unbounded keys."""
+        """Bound the map so one request cannot carry unbounded keys."""
         if len(value) > 600:
             raise ValueError("extra_features may not contain more than 600 keys")
         return value
@@ -104,34 +96,16 @@ class TransactionRequest(BaseModel):
         return record
 
 
-class BatchPredictionRequest(BaseModel):
-    """A batch of transactions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    transactions: Annotated[list[TransactionRequest], Field(min_length=1, max_length=500)]
-
-
 class PredictionResponse(BaseModel):
     """Scoring result for one transaction."""
 
     fraud_probability: Annotated[float, Field(ge=0.0, le=1.0)]
     risk_level: RiskLevel
-    model_version: str
-    request_id: str
-    decision_threshold: float
     flagged: bool = Field(description="Whether the probability meets the decision threshold.")
-    latency_ms: float
-    features_supplied: int = Field(description="Non-null raw features provided by the caller.")
-
-
-class BatchPredictionResponse(BaseModel):
-    """Scoring results for a batch."""
-
-    predictions: list[PredictionResponse]
-    count: int
+    decision_threshold: float
     model_version: str
     latency_ms: float
+    features_supplied: int
 
 
 class FeatureContributionResponse(BaseModel):
@@ -149,46 +123,28 @@ class ExplanationResponse(BaseModel):
     fraud_probability: Annotated[float, Field(ge=0.0, le=1.0)]
     risk_level: RiskLevel
     model_version: str
-    request_id: str
     base_value: float = Field(description="Model output for an average input, in log-odds.")
     top_factors: list[FeatureContributionResponse]
     latency_ms: float
 
 
 class HealthResponse(BaseModel):
-    """Liveness and dependency status."""
+    """Liveness plus model provenance.
+
+    Provenance is folded in here rather than given its own endpoint: it is the
+    same question ("what is running?") and one fewer route to document.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
 
     status: Literal["ok", "degraded"]
     model_loaded: bool
     model_version: str
-    redis: Literal["up", "down", "disabled"]
-    database: Literal["up", "down", "disabled"]
+    model_name: str | None = None
+    trained_at: str | None = None
+    n_features: int | None = None
+    calibrated: bool | None = None
+    decision_threshold: float | None = None
+    holdout_metrics: dict[str, Any] = Field(default_factory=dict)
     uptime_seconds: float
-
-
-class ModelInfoResponse(BaseModel):
-    """Provenance and measured performance of the loaded model."""
-
-    model_config = ConfigDict(protected_namespaces=())
-
-    model_name: str
-    model_version: str
-    trained_at: str
-    n_features: int
-    n_train_rows: int
-    calibrated: bool
-    decision_threshold: float
-    risk_thresholds: dict[str, float]
-    validation_metrics: dict[str, Any]
-    holdout_metrics: dict[str, Any]
-    feature_config: dict[str, Any]
-    hyperparameters: dict[str, Any]
-    library_versions: dict[str, str]
-
-
-class ErrorResponse(BaseModel):
-    """Structured error body."""
-
-    detail: str
-    error_type: str
-    request_id: str | None = None
+    requests_served: int

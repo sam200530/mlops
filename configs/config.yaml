@@ -38,3 +38,17 @@ train:
 serving:
   risk_threshold_medium: 0.30
   risk_threshold_high: 0.70
+
+monitoring:
+  # Conventional PSI bands from credit/fraud risk practice: heuristics, not
+  # properties of this dataset, kept in config so tightening an alert is not a
+  # code change.
+  #   < 0.10 stable | 0.10-0.25 moderate | > 0.25 significant
+  psi_stable_below: 0.10
+  psi_moderate_below: 0.25
+  n_bins: 10
+  # Rows sampled per period; PSI is stable well below the full 472k rows.
+  sample_rows: 60000
+  # Caveat: PSI above ~10 comes from high-cardinality categoricals where a level
+  # appears in one period and not the other, at which point the epsilon floor
+  # dominates. Treat categorical PSI as a ranking, not a distance.

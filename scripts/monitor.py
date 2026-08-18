@@ -1,23 +1,29 @@
-"""Offline drift and data-quality monitoring.
+"""Drift monitoring: training distribution vs a later period.
 
 **On honesty about the traffic.** This project has no production users, so nothing
-here is real production traffic. But the monitoring is not therefore synthetic
-either: the default comparison is the training period against the **real, unlabeled
-Kaggle test period, which begins 30 days after training ends**. That is genuine
-covariate shift measured on genuine data, and it is a far better demonstration
-than randomly perturbing a copy of the training set.
+here is production traffic. But the comparison is not synthetic either: the
+default is the training period against the **real, unlabeled IEEE-CIS test period,
+which begins 30 days after training ends**. That is genuine covariate shift on
+genuine data, which is a far better demonstration than perturbing a copy of the
+training set.
 
-Three reports are produced:
+Two statistics, because they answer different questions:
 
-1. ``feature_drift.csv`` — PSI + KS per feature, training vs the later period.
-2. ``data_quality.json`` — schema, missing-rate and range checks against the
-   training reference profile.
-3. ``prediction_drift.json`` — drift in the model's own score distribution, the
-   only drift signal available without labels (chargeback labels arrive weeks
-   after the transaction).
+* **PSI** bins the reference distribution and compares mass per bin. Interpretable
+  on a fixed scale and insensitive to sample size, which is why it is the trigger.
+* **KS** tests the largest CDF gap, catching shape changes PSI's binning smooths
+  over — but its p-value goes to zero for *any* difference once n is large, so it
+  is reported alongside rather than used as the alarm.
+
+Per-feature missing-rate deltas come out of the same pass, which is why a separate
+data-quality module is unnecessary.
+
+Outputs (``reports/monitoring/``):
+    feature_drift.csv        PSI, KS and missing-rate delta per feature
+    monitoring_summary.json  verdict counts, prediction drift, top drifted features
 
 Usage:
-    python scripts/monitor.py                    # train vs test period (needs --with-test build)
+    python scripts/monitor.py                    # train vs test period
     python scripts/monitor.py --current holdout  # train vs holdout period
 """
 
@@ -35,11 +41,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.schema import TARGET  # noqa: E402
 from src.models.artifact import ARTIFACT_FILENAME, ModelArtifact  # noqa: E402
-from src.monitoring.data_quality import (  # noqa: E402
-    ReferenceProfile,
-    check_quality,
-    summarise_issues,
-)
 from src.monitoring.drift import feature_drift, prediction_drift, summarise  # noqa: E402
 from src.utils.logging_config import setup_logging  # noqa: E402
 from src.utils.paths import MODELS_DIR, PROCESSED_DIR, REPORTS_DIR, ensure_dir  # noqa: E402
@@ -48,7 +49,7 @@ logger = logging.getLogger("monitor")
 
 MONITORING_DIR = REPORTS_DIR / "monitoring"
 
-#: Rows sampled from each period. PSI is stable well below the full 470k rows, and
+#: Rows sampled per period. PSI is stable well below the full 472k rows, and
 #: sampling keeps the report runnable in constrained memory.
 SAMPLE_ROWS = 60_000
 
@@ -57,7 +58,7 @@ def _load(name: str, sample: int, seed: int) -> pd.DataFrame:
     path = PROCESSED_DIR / f"{name}_prepared.parquet"
     if not path.is_file():
         raise FileNotFoundError(
-            f"{path} missing. Run scripts/build_dataset.py"
+            f"{path} missing. Run: python scripts/build_dataset.py"
             + (" --with-test" if name == "test" else "")
         )
     df = pd.read_parquet(path)
@@ -68,7 +69,7 @@ def _load(name: str, sample: int, seed: int) -> pd.DataFrame:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run drift and data-quality monitoring.")
+    parser = argparse.ArgumentParser(description="Run PSI/KS drift monitoring.")
     parser.add_argument("--current", default="test", choices=["test", "holdout"])
     parser.add_argument("--sample", type=int, default=SAMPLE_ROWS)
     parser.add_argument("--seed", type=int, default=42)
@@ -86,7 +87,7 @@ def main() -> int:
         return 1
 
     # Compare only model-input features: internal keys and the target are not
-    # part of what the model sees, so drift in them is not actionable.
+    # what the model sees, so drift in them is not actionable.
     exclude = {TARGET, "TransactionID", "TransactionDT"}
     features = [
         c
@@ -95,7 +96,7 @@ def main() -> int:
     ]
     logger.info("Comparing %d features: modelling vs %s", len(features), args.current)
 
-    # --- 1. feature drift -------------------------------------------------
+    # --- feature drift (PSI + KS + missing-rate delta) ----------------------
     drift_table = feature_drift(reference[features], current[features])
     drift_path = MONITORING_DIR / "feature_drift.csv"
     drift_table.to_csv(drift_path, index=False)
@@ -112,26 +113,7 @@ def main() -> int:
         ", ".join(f"{r['feature']} (PSI {r['psi']:.3f})" for r in drift_summary["top"][:8]),
     )
 
-    # --- 2. data quality --------------------------------------------------
-    profile_path = MONITORING_DIR / "reference_profile.json"
-    if profile_path.is_file():
-        profile = ReferenceProfile.load(profile_path)
-    else:
-        profile = ReferenceProfile.from_frame(reference[features])
-        profile.save(profile_path)
-    issues = check_quality(current[features], profile)
-    quality_summary = summarise_issues(issues)
-    (MONITORING_DIR / "data_quality.json").write_text(
-        json.dumps(quality_summary, indent=2), encoding="utf-8"
-    )
-    logger.info(
-        "Data quality: %d issues (%d high, %d medium)",
-        quality_summary["n_issues"],
-        quality_summary["high"],
-        quality_summary["medium"],
-    )
-
-    # --- 3. prediction drift ----------------------------------------------
+    # --- prediction drift ---------------------------------------------------
     prediction_report: dict[str, object] = {"status": "model_unavailable"}
     artifact_path = MODELS_DIR / ARTIFACT_FILENAME
     if artifact_path.is_file():
@@ -165,7 +147,6 @@ def main() -> int:
         "current": f"{args.current}_prepared",
         "n_features_compared": len(features),
         "feature_drift": drift_summary,
-        "data_quality": {k: v for k, v in quality_summary.items() if k != "issues"},
         "prediction_drift": prediction_report,
     }
     summary_path = MONITORING_DIR / "monitoring_summary.json"

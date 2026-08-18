@@ -1,18 +1,38 @@
-# Full training / research stack.
+# Runtime + training dependencies, pinned to the versions this project was
+# actually developed and tested against on Python 3.12.4.
 #
-# XGBoost is deliberately absent — see docs/01_dataset_audit.md §10. LightGBM is
-# the boosted-tree implementation for this project; running both doubles tuning
-# cost for a number that changes no decision.
+# XGBoost is deliberately absent: it and LightGBM land in the same accuracy
+# neighbourhood on tabular data, so running both doubles tuning cost for a
+# number that changes no decision. LightGBM wins on this data specifically for
+# native categorical support and native NaN routing.
 
--r requirements-api.txt
+# Core numerics
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.14.0
+pyarrow==22.0.0
+
+# Model
+lightgbm==4.7.0
+scikit-learn==1.2.2
+
+# Explainability (powers POST /explain)
+shap==0.52.0
 
 # Tuning
 optuna==4.9.0
 
-# Analysis + plots (EDA, evaluation figures, SHAP plots)
-matplotlib>=3.8,<4
-seaborn>=0.13,<1
+# Experiment tracking (local ./mlruns file store; no server required)
+mlflow==3.8.1
 
-# Notebook support (EDA only)
-jupyter>=1.0
-ipykernel>=6.29
+# API
+fastapi==0.115.14
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+
+# Plots for evaluation figures and SHAP summaries
+matplotlib>=3.8,<4
+
+# Config
+PyYAML>=6.0

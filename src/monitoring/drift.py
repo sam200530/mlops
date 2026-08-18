@@ -14,7 +14,7 @@ Two complementary statistics, because they answer different questions:
 Conventional PSI thresholds are used and stated explicitly rather than left
 implicit: **< 0.10 stable, 0.10–0.25 moderate shift, > 0.25 significant shift.**
 These are heuristics from risk modelling practice, not properties of this
-dataset; they are configurable in ``configs/monitoring.yaml``.
+dataset, and are stated here rather than left implicit.
 
 Bin edges come from the **reference** distribution and are reused for the current
 window. Re-binning per window would compare two different binnings and produce a

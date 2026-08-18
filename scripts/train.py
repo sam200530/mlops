@@ -449,7 +449,6 @@ def main() -> int:
         mlflow.log_artifact(str(comparison_path))
         logger.info("\n%s", comparison.to_string(index=False))
 
-        mlflow.set_tag("run_id_for_registry", parent_run.info.run_id)
         (ensure_dir(REPORTS_DIR) / "last_run.json").write_text(
             json.dumps(
                 {
