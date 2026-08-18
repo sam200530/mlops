@@ -133,11 +133,14 @@ jobs:
             -d '{"transaction_amt": 100.0, "product_cd": "W"}')
           [ "$code" = "503" ] || { echo "expected 503, got $code"; docker logs fraud-api-ci; exit 1; }
 
-          echo "--- POST /predict with an invalid body must be 422 ---"
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
-            -H 'Content-Type: application/json' \
-            -d '{"transaction_amt": -5.0}')
-          [ "$code" = "422" ] || { echo "expected 422, got $code"; exit 1; }
+          echo "--- POST /predict with an invalid body is also 503 without a model ---"
+          # FastAPI resolves dependencies before validating the request body, so
+          # require_artifact's 503 short-circuits ahead of the 422. With no model
+          # mounted every /predict call is 503 regardless of payload. The 422
+          # validation path is covered by tests/test_api.py, which runs with a
+          # model loaded and asserts 422 across 8 parametrised invalid payloads.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d '{"transaction_amt": -5.0}')
+          [ "$code" = "503" ] || { echo "expected 503, got $code"; docker logs fraud-api-ci; exit 1; }
 
           echo "All smoke tests passed"
 
