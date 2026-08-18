@@ -1,5 +1,7 @@
 # Leakage-Safe Fraud Detection Platform
 
+[![CI](https://github.com/sam200530/fraud-detection-platform-mlops-/actions/workflows/ci.yml/badge.svg)](https://github.com/sam200530/fraud-detection-platform-mlops-/actions/workflows/ci.yml)
+
 A fraud detection system on the [IEEE-CIS](https://www.kaggle.com/c/ieee-fraud-detection)
 dataset, built around one question: **how do you know your validation number is real?**
 
@@ -468,9 +470,23 @@ frame is sorted chronologically; and an over-strict `card1` bound that rejected
 the real test split, where `card1` reaches 18,397 against training's 18,396.
 
 **GitHub Actions** (`.github/workflows/ci.yml`): `lint → test → docker build → API
-smoke test`. The smoke test starts the image **without a model** and asserts
-`/health` reports degraded, all three routes appear in the OpenAPI spec,
-`/predict` returns **503** (not 500), and an invalid body returns **422**.
+smoke test`, green in ~3m 50s. The smoke test starts the image **without a model**
+and asserts the container stays up, `/health` reports `degraded`, all three routes
+appear in the OpenAPI spec, and `/predict` returns **503** rather than 500.
+
+Note on that last assertion: `/predict` declares `Depends(require_artifact)`, and
+FastAPI resolves dependencies *before* validating the request body — so with no
+model mounted every call is 503 regardless of payload. The 422 validation path is
+covered by `tests/test_api.py`, which runs with a model loaded.
+
+CI earned its place immediately: the first runs surfaced five defects that local
+development had hidden — a ruff version pinned inconsistently in three places, a
+lint rule that exists in one ruff version and not another, a dependency set that
+was **not installable from scratch** (shap 0.52 requires `numpy>=2` against a
+`numpy==1.26.4` pin, and scikit-learn 1.2.2 has no CPython 3.12 wheel), a stale
+`.dockerignore` entry excluding the very `requirements.txt` the Dockerfile copies,
+and a smoke-test assertion based on a wrong assumption about FastAPI's resolution
+order.
 
 ## Project Architecture
 
@@ -605,9 +621,13 @@ No MLflow server is required.
    1.3.2 is a minor version step and expected to work, but has not been verified
    on this machine.
 
-10. **Docker was not built in the development environment**, because Docker is not
-    installed there. The Dockerfile is written and the CI workflow builds and
-   smoke-tests it, but the build has not been executed locally.
+10. **Docker is verified in CI, not on the development machine.** Docker is not
+    installed locally, so the image has never been built here. It *is* built and
+    smoke-tested on every push by GitHub Actions — the container starts, `/health`
+    reports `degraded` without a mounted model, all three routes appear in the
+    OpenAPI spec, and `/predict` returns 503 rather than 500. What remains
+    unverified is the image running with a real model artifact mounted, since CI
+    has no trained model to mount.
 
 ## Future Improvements
 
