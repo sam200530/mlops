@@ -90,58 +90,93 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Start container
-        # No model artifact is mounted: CI has no trained model. The service is
-        # designed to start anyway and report degraded health, which is what this
-        # smoke test asserts — a crash-loop here would be a real bug.
-        run: docker run -d --name fraud-api-ci -p 8000:8000 fraud-api:ci
+        run: |
+          docker run -d --name fraud-api-ci -p 8000:8000 fraud-api:ci
+          sleep 3
+          echo "--- container state immediately after start ---"
+          docker ps -a --filter name=fraud-api-ci --format '{{.Names}} {{.Status}}'
+          # If uvicorn died on import the container is already gone; surface that
+          # here rather than after a 60s readiness timeout.
+          running=$(docker inspect -f '{{.State.Running}}' fraud-api-ci)
+          if [ "$running" != "true" ]; then
+            echo "Container is not running. Exit code and logs follow."
+            docker inspect -f '{{.State.ExitCode}}' fraud-api-ci
+            docker logs fraud-api-ci
+            exit 1
+          fi
 
       - name: Wait for the service to respond
         run: |
-          for attempt in $(seq 1 30); do
+          # Startup imports shap, scikit-learn and pandas, which is slow on a
+          # cold container, so allow 120s before declaring failure.
+          for attempt in $(seq 1 60); do
             if curl -fsS http://localhost:8000/health > /dev/null 2>&1; then
-              echo "Service responded after ${attempt} attempt(s)"
+              echo "Service responded after $((attempt * 2))s"
               exit 0
+            fi
+            if ! docker inspect -f '{{.State.Running}}' fraud-api-ci | grep -q true; then
+              echo "Container died while starting up:"
+              docker logs fraud-api-ci
+              exit 1
             fi
             sleep 2
           done
-          echo "Service did not become ready"
+          echo "Service did not become ready within 120s"
           docker logs fraud-api-ci
           exit 1
 
       - name: Smoke test endpoints
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          fail=0
+          check() {  # check <label> <actual> <expected>
+            if [ "$2" = "$3" ]; then
+              echo "  PASS  $1 -> $2"
+            else
+              echo "  FAIL  $1 -> $2 (expected $3)"; fail=1
+            fi
+          }
 
-          echo "--- GET /health (must report degraded without a model) ---"
-          health=$(curl -fsS http://localhost:8000/health)
+          echo "=== GET /health ==="
+          health=$(curl -sS http://localhost:8000/health)
           echo "$health"
-          echo "$health" | grep -q '"status":"degraded"'
-          echo "$health" | grep -q '"model_loaded":false'
+          case "$health" in
+            *'"status":"degraded"'*) echo "  PASS  status is degraded" ;;
+            *) echo "  FAIL  status is not degraded"; fail=1 ;;
+          esac
+          case "$health" in
+            *'"model_loaded":false'*) echo "  PASS  model_loaded is false" ;;
+            *) echo "  FAIL  model_loaded is not false"; fail=1 ;;
+          esac
 
-          echo "--- GET /docs ---"
-          curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8000/docs | grep -q 200
+          echo "=== GET /docs ==="
+          check "/docs" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/docs)" "200"
 
-          echo "--- all three routes registered in the OpenAPI spec ---"
-          spec=$(curl -fsS http://localhost:8000/openapi.json)
+          echo "=== OpenAPI routes ==="
+          spec=$(curl -sS http://localhost:8000/openapi.json)
           for route in "/health" "/predict" "/explain"; do
-            echo "$spec" | grep -q "\"$route\"" || { echo "missing route $route"; exit 1; }
+            case "$spec" in
+              *"\"$route\""*) echo "  PASS  $route registered" ;;
+              *) echo "  FAIL  $route missing from spec"; fail=1 ;;
+            esac
           done
 
-          echo "--- POST /predict without a model must be 503, not 500 ---"
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
-            -H 'Content-Type: application/json' \
-            -d '{"transaction_amt": 100.0, "product_cd": "W"}')
-          [ "$code" = "503" ] || { echo "expected 503, got $code"; docker logs fraud-api-ci; exit 1; }
+          echo "=== POST /predict without a model ==="
+          # /predict declares Depends(require_artifact); FastAPI resolves
+          # dependencies before validating the body, so with no model mounted
+          # every call is 503 regardless of payload. The 422 validation path is
+          # covered by tests/test_api.py, which runs with a model loaded.
+          check "valid body" "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d '{"transaction_amt": 100.0, "product_cd": "W"}')" "503"
+          check "invalid body" "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d '{"transaction_amt": -5.0}')" "503"
 
-          echo "--- POST /predict with an invalid body is also 503 without a model ---"
-          # FastAPI resolves dependencies before validating the request body, so
-          # require_artifact's 503 short-circuits ahead of the 422. With no model
-          # mounted every /predict call is 503 regardless of payload. The 422
-          # validation path is covered by tests/test_api.py, which runs with a
-          # model loaded and asserts 422 across 8 parametrised invalid payloads.
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d '{"transaction_amt": -5.0}')
-          [ "$code" = "503" ] || { echo "expected 503, got $code"; docker logs fraud-api-ci; exit 1; }
+          echo "=== POST /explain without a model ==="
+          check "/explain" "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/explain -H 'Content-Type: application/json' -d '{"transaction_amt": 100.0, "product_cd": "W"}')" "503"
 
+          if [ "$fail" -ne 0 ]; then
+            echo "Smoke tests failed; container logs follow."
+            docker logs fraud-api-ci
+            exit 1
+          fi
           echo "All smoke tests passed"
 
       - name: Container logs
