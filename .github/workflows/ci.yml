@@ -35,7 +35,10 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install ruff==0.8.4
+        # Version is read from requirements-dev.txt so local and CI can never
+        # drift. A hardcoded pin here previously disagreed with the locally
+        # installed version and failed the build on formatting differences.
+        run: pip install "$(grep '^ruff==' requirements-dev.txt)"
 
       - name: Ruff check
         run: ruff check src api scripts tests
