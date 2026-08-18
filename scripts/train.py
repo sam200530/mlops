@@ -321,7 +321,7 @@ def main() -> int:
             {
                 f"val_{k}": v
                 for k, v in validation_metrics.to_flat_dict().items()
-                if isinstance(v, (int, float))
+                if isinstance(v, int | float)
             }
         )
         rows.append(
@@ -416,7 +416,7 @@ def main() -> int:
                 {
                     f"holdout_{k}": v
                     for k, v in holdout_metrics.to_flat_dict().items()
-                    if isinstance(v, (int, float))
+                    if isinstance(v, int | float)
                 }
             )
             artifact.metadata.holdout_metrics = holdout_metrics.to_flat_dict()

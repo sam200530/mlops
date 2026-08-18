@@ -65,7 +65,7 @@ class ShapExplainer:
         if self._base_value is None:
             expected = self.explainer.expected_value
             self._base_value = float(
-                expected[-1] if isinstance(expected, (list, np.ndarray)) else expected
+                expected[-1] if isinstance(expected, list | np.ndarray) else expected
             )
         return self._base_value
 
@@ -167,9 +167,9 @@ def _jsonable_value(value: Any) -> float | str | None:
     """Coerce a cell value into something JSON-serialisable."""
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
-    if isinstance(value, (np.integer, int)):
+    if isinstance(value, np.integer | int):
         return int(value)
-    if isinstance(value, (np.floating, float)):
+    if isinstance(value, np.floating | float):
         return None if np.isnan(value) else round(float(value), 6)
     return str(value)
 

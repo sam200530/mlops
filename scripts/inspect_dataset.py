@@ -165,13 +165,13 @@ class FileProfile:
 
 def _jsonable(value: Any) -> Any:
     """Coerce numpy/pandas scalars into JSON-serialisable Python objects."""
-    if isinstance(value, (np.integer,)):
+    if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, (np.floating,)):
+    if isinstance(value, np.floating):
         return float(value)
-    if isinstance(value, (np.bool_,)):
+    if isinstance(value, np.bool_):
         return bool(value)
-    if value is None or isinstance(value, (int, float, str, bool)):
+    if value is None or isinstance(value, int | float | str | bool):
         return value
     return str(value)
 
