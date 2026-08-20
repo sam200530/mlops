@@ -117,7 +117,7 @@ So it was measured rather than asserted (`scripts/train.py --random-cv-control`)
 | Purged forward-chaining 5-fold | **0.5583** | 0.8838 | 0.9268 | ± 0.0225 |
 | **Optimism** | **+0.2929** | +0.0819 | +0.0707 | — |
 
-The holdout later scored **0.5669** — within one standard deviation of the
+The holdout later scored **0.5639** — within one standard deviation of the
 temporal estimate and nowhere near the random one. That is the practical
 confirmation that the temporal scheme was the honest choice.
 
@@ -220,43 +220,63 @@ Models are compared on **identical persisted folds**, from a full run
 MLflow; `reports/model_comparison.csv` is regenerated on each run and therefore
 reflects whatever was executed last, so the table here is the canonical record.
 
-> **XGBoost is in the roster but not yet in this table.** It was added after this
-> run, with hyperparameters mirrored to LightGBM's and the same native categorical
-> handling, so the comparison measures the algorithms rather than the setup.
-> Whichever booster wins cross-validation is the one Optuna tunes. The table below
-> will be regenerated on the next full run rather than estimated here.
-
 | model | CV PR-AUC | lift | ROC-AUC | precision | recall | F1 | Brier | P@top 1% | train time |
 |---|---|---|---|---|---|---|---|---|---|
-| **LightGBM (tuned)** | **0.5728 ± 0.0248** | **15.82×** | 0.8921 | 0.7161 | 0.4623 | 0.5613 | 0.0239 | 0.9283 | 1223.7 s |
-| LightGBM (baseline) | 0.5583 ± 0.0225 | 15.45× | 0.8838 | 0.6766 | 0.4692 | 0.5533 | 0.0236 | 0.9268 | 1031.6 s |
-| Random Forest | 0.4698 ± 0.0440 | 12.86× | 0.8822 | 0.5476 | 0.4051 | 0.4648 | 0.0920 | 0.8280 | 532.4 s |
-| Logistic Regression | 0.3546 ± 0.0690 | 9.59× | 0.8317 | 0.4538 | 0.3581 | 0.3992 | 0.1386 | 0.7174 | 421.3 s |
+| **LightGBM (tuned)** | **0.5754 ± 0.0239** | **15.91×** | 0.8967 | 0.6684 | 0.4862 | 0.5616 | 0.0227 | 0.9238 | 2960.6 s |
+| LightGBM (baseline) | 0.5583 ± 0.0225 | 15.45× | 0.8838 | 0.6766 | 0.4692 | 0.5533 | 0.0236 | 0.9268 | 638.9 s |
+| XGBoost | 0.5370 ± 0.0211 | 14.83× | 0.8754 | 0.6675 | 0.4515 | 0.5381 | 0.0242 | 0.9172 | 1579.6 s |
+| Random Forest | 0.4677 ± 0.0404 | 12.82× | 0.8819 | 0.5415 | 0.4049 | 0.4604 | 0.0966 | 0.8295 | 185.1 s |
+| Logistic Regression | 0.3560 ± 0.0703 | 9.62× | 0.8328 | 0.4462 | 0.3661 | 0.4018 | 0.1400 | 0.7151 | 115.0 s |
 
-**Boosting is measured to be better, not assumed** — LightGBM beats Random Forest
-by +0.103 PR-AUC and Logistic Regression by +0.218.
+**Boosting is measured to be better, not assumed** — untuned LightGBM beats Random
+Forest by +0.091 PR-AUC and Logistic Regression by +0.202.
 
-**ROC-AUC hides most of that gap.** Random Forest reaches 0.8822 against
-LightGBM's 0.8921 — a 0.010 difference — while the PR-AUC gap is ten times larger.
-With 569,877 negatives in the FPR denominator, ROC-AUC barely registers the
-false-positive volume separating these models. Selecting on ROC-AUC would have
-called it near a tie.
+**XGBoost was run and lost.** It was given a search space mirrored to LightGBM's,
+the same native categorical handling, the same folds and the same early-stopping
+rule, so the comparison reflects the algorithms rather than the setup. It came in
+0.021 PR-AUC lower at 2.1× the training cost, winning 1 of 5 folds (fold 3). The
+margin is comparable to the fold-to-fold spread (±0.021), so this is a consistent
+but modest loss, not a decisive one — the 4-of-5 fold record is what makes it
+credible, not the mean alone. It is reported rather than dropped: a comparison in
+which the challenger always wins would say nothing about the methodology.
 
-**Calibration separates them further:** Brier 0.0239 (LightGBM) vs 0.0920 (RF) vs
-0.1386 (LogReg).
+**ROC-AUC hides most of that gap.** Random Forest reaches 0.8819 against untuned
+LightGBM's 0.8838 — a **0.002** difference — while the PR-AUC gap is **0.091**,
+roughly fifty times larger. With ~570k negatives in the FPR denominator, ROC-AUC
+barely registers the false-positive volume separating these models. Selecting on
+ROC-AUC would have called them equivalent. This is the in-repo demonstration of
+why PR-AUC is the selection metric at 3.5% prevalence.
 
-Two caveats stated rather than hidden: Logistic Regression and Random Forest were
-fitted on **150,000 rows** (all positives kept, negatives downsampled) because
-their one-hot matrices are 1,296 features wide and a 472k × 1,296 dense float32
-matrix does not fit this machine; LightGBM used every row with 530 native
-features. Tuning gained **+0.0145 PR-AUC** from 5 Optuna trials in 1928.6 s — the
-wall-clock cap stopped the search, not convergence.
+**Stability tracks capability.** PR-AUC standard deviation runs 0.0225 → 0.0211 →
+0.0404 → 0.0703 down the untuned table. Logistic Regression is not merely worse on
+average, it is ~3× more volatile across time periods.
+
+**Calibration separates the tree models further:** Brier 0.0236 (LightGBM) vs
+0.0966 (RF) vs 0.1400 (LogReg) — RF is 4× worse calibrated than LightGBM despite
+near-identical ROC-AUC. This matters because the API serves probabilities, not
+only rankings.
+
+Three caveats stated rather than hidden. Logistic Regression and Random Forest were
+fitted on **100,000 rows** (all positives kept, negatives downsampled) because
+their one-hot matrices are 929 features wide and a 472k-row dense float32 matrix
+does not fit this machine; LightGBM and XGBoost used every row with 530 native
+features. Tuning gained **+0.0171 PR-AUC** from **8 of 25 Optuna trials** in
+5964.4 s — the wall-clock cap stopped the search, not convergence, so 0.5754 is a
+lightly-searched improvement rather than a converged optimum. Finally, the tuned
+model hit the 2,000-round ceiling on 3 of 5 folds, meaning the round cap rather
+than the hyperparameters is the binding constraint.
 
 ## Final Model
 
 **LightGBM**, Optuna-tuned, isotonic-calibrated, trained on all 472,432 modelling
-rows. Hyperparameters: `learning_rate` 0.0276, `num_leaves` 230,
-`min_child_samples` 144, `feature_fraction` 0.659, `bagging_fraction` 0.662.
+rows. Hyperparameters: `learning_rate` 0.0165, `num_leaves` 240,
+`min_child_samples` 162, `feature_fraction` 0.864, `bagging_fraction` 0.958,
+`lambda_l1` 0.246, `lambda_l2` 4.870.
+
+The search converged toward a coherent regime rather than wandering: a low
+learning rate with many leaves, but `min_child_samples` held high so that a leaf
+at 3.5% prevalence still contains real positives instead of memorising individual
+frauds.
 
 Imbalance is handled by **reweighting, not resampling**. SMOTE would interpolate
 between fraud rows across a ~530-column space that is largely categorical and
@@ -270,44 +290,46 @@ preprocessing step drifting out of sync with the model.
 
 ## Evaluation
 
-The holdout was scored **exactly once**, using the threshold (0.3827) chosen on
+The holdout was scored **exactly once**, using the threshold (0.3070) chosen on
 validation and applied unchanged.
 
 | metric | validation (last fold) | **holdout (final)** |
 |---|---|---|
-| PR-AUC | 0.6008 | **0.5669** |
-| PR-AUC lift over prevalence | 15.67× | **16.48×** |
-| ROC-AUC | 0.9123 | **0.9091** |
-| Precision | 0.7437 | **0.7279** |
-| Recall | 0.5114 | **0.4727** |
-| F1 | 0.6061 | **0.5732** |
-| Brier | 0.0211 | **0.0202** |
-| Precision @ top 0.1% | — | **0.9492** |
-| Precision @ top 1% | 0.9098 | **0.9086** |
-| Recall @ top 1% | — | **0.2640** |
+| PR-AUC | 0.6069 | **0.5639** |
+| PR-AUC lift over prevalence | 15.83× | **16.39×** |
+| ROC-AUC | 0.9172 | **0.9117** |
+| Precision | 0.6623 | **0.5966** |
+| Recall | 0.5581 | **0.5325** |
+| F1 | 0.6058 | **0.5627** |
+| Brier | 0.0211 | **0.0204** |
+| Precision @ top 0.1% | — | **0.9915** |
+| Precision @ top 1% | 0.9085 | **0.9009** |
+| Recall @ top 1% | — | **0.2618** |
 | Rows | 78,739 | 118,108 |
 
-**Confusion matrix** at threshold 0.3827 (prevalence 3.4409%):
+**Confusion matrix** at threshold 0.3070 (prevalence 3.4409%):
 
 |  | predicted legit | predicted fraud |
 |---|---|---|
-| **actually legit** | 113,326 | 718 |
-| **actually fraud** | 2,143 | 1,921 |
+| **actually legit** | 112,581 | 1,463 |
+| **actually fraud** | 1,900 | 2,164 |
 
 What this means operationally:
 
-- **PR-AUC 0.5669 is 16.48× the no-skill floor** of 0.0344. The absolute number
+- **PR-AUC 0.5639 is 16.39× the no-skill floor** of 0.0344. The absolute number
   looks unimpressive only if the floor is forgotten.
-- **At a 1% alert budget, 90.9% of alerts are genuine fraud**, catching 26.4% of
-  all fraud — nine in ten investigations are productive.
-- **At the operating point: 718 false positives against 1,921 caught frauds** —
-  roughly one false alarm per 2.7 detections, at the cost of missing 2,143. That
+- **At a 1% alert budget, 90.1% of alerts are genuine fraud**, catching 26.2% of
+  all fraud — nine in ten investigations are productive. Tightening to a 0.1%
+  budget raises precision to **99.2%**.
+- **At the operating point: 1,463 false positives against 2,164 caught frauds** —
+  roughly one false alarm per 1.5 detections, at the cost of missing 1,900. That
   trade is a business choice, which is why the threshold is configuration.
-- **Calibration is real**: isotonic cut expected calibration error from 0.01477 to
-  ~0 on validation, and the holdout Brier came in *below* validation.
+- **Calibration is real**: isotonic cut expected calibration error from 0.00668 to
+  0.00000 on validation (Brier 0.02174 → 0.02109), and it held out of sample —
+  holdout ECE 0.00338 and holdout Brier 0.0204, *below* validation's 0.0211.
 
-**Holdout (0.5669) sits below validation (0.6008) and within one SD of the
-temporal CV mean (0.5728 ± 0.0248).** That small drop is the expected, honest
+**Holdout (0.5639) sits below validation (0.6069) and within one SD of the
+temporal CV mean (0.5754 ± 0.0239).** That small drop is the expected, honest
 pattern: validation informed the threshold and calibration, so it is mildly
 optimistic; the holdout was untouched. A holdout scoring *above* validation would
 be a reason to suspect the split, not to celebrate.
@@ -606,12 +628,14 @@ No MLflow server is required.
    `card1 + addr1 + card2` approximates one. Cards sharing those values merge; a
    card whose `addr1` changes splits.
 
-6. **Dense baselines are subsampled** to 150,000 rows, recorded in
+6. **Dense baselines are subsampled** to 100,000 rows, recorded in
    `model_comparison.csv` rather than hidden. The comparison is not perfectly
    equal, and saying so is the point.
 
-7. **Bounded hyperparameter search** — 5 Optuna trials under a 1800 s cap; the
-   timeout stopped it, not convergence.
+7. **Bounded hyperparameter search** — 8 of 25 Optuna trials under a 5400 s cap;
+   the timeout stopped it, not convergence. The tuned model also reached the
+   2,000-round ceiling on 3 of 5 folds, so the round cap — not the hyperparameters
+   — is the binding constraint on further gains.
 
 8. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
    deployment.
