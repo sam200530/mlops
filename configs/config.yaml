@@ -32,7 +32,10 @@ train:
   seed: 42
   n_jobs: -1
   optuna_trials: 25
-  optuna_timeout_seconds: 1800
+  # Raised from 1800s: the previous run completed only 5 of 25 trials before the
+  # timeout, with a 0.0477 PR-AUC spread across those five - clear evidence the
+  # search space was under-explored rather than converged.
+  optuna_timeout_seconds: 5400
   calibrate: true
 
 serving:

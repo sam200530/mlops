@@ -73,6 +73,12 @@ class FeaturePipeline:
 
     velocity_windows_hours: tuple[int, ...] = (1, 24, 168)
     anchor_d_columns: bool = True
+    #: Feature-name suffixes dropped from the model input. Empty by default, so
+    #: the pipeline is unchanged unless a run opts in. Exists to make feature
+    #: ablations a config flag rather than a code edit — see the D*_anchored
+    #: ablation in the README, where drift showed those features harm temporal
+    #: generalisation despite ranking highly by SHAP.
+    exclude_feature_suffixes: tuple[str, ...] = ()
     frequency_min_count: int = 1
     frequency_encoder: FrequencyEncoder = field(default_factory=FrequencyEncoder)
     entity_aggregator: EntityAmountAggregator = field(default_factory=EntityAmountAggregator)
@@ -177,13 +183,26 @@ class FeaturePipeline:
         )
 
     def _select_feature_columns(self, df: pd.DataFrame) -> list[str]:
-        """Everything except hard exclusions and internal helper columns."""
+        """Everything except hard exclusions, helper columns and opt-in suffixes."""
         excluded = set(EXCLUDED_FROM_FEATURES)
-        return [
+        selected = [
             c
             for c in df.columns
             if c not in excluded and not c.startswith(INTERNAL_PREFIX) and c != TIME_COL
         ]
+        if self.exclude_feature_suffixes:
+            before = len(selected)
+            selected = [
+                c for c in selected if not c.endswith(tuple(self.exclude_feature_suffixes))
+            ]
+            logger.info(
+                "Excluded %d features by suffix %s (%d -> %d)",
+                before - len(selected),
+                list(self.exclude_feature_suffixes),
+                before,
+                len(selected),
+            )
+        return selected
 
     # --- persistence ------------------------------------------------------
 

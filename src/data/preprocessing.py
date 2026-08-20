@@ -116,7 +116,10 @@ class LinearPreprocessor:
         self.categorical_columns = [c for c in df.columns if _is_categorical_like(df[c])]
         numeric = df[self.numeric_columns]
 
-        self.medians = numeric.median(numeric_only=False)
+        # An all-NaN column yields a NaN median, which would then propagate into
+        # the output matrix. Resolving it here means transform() needs no
+        # full-matrix NaN sweep (see the note there).
+        self.medians = numeric.median(numeric_only=False).fillna(0.0)
         # Only columns that actually have nulls get an indicator — an all-present
         # column's indicator would be a constant zero feature.
         self.indicator_columns = [c for c in self.numeric_columns if numeric[c].isna().any()]
@@ -164,6 +167,11 @@ class LinearPreprocessor:
         scaled = (
             (numeric.fillna(self.medians).to_numpy(dtype="float32") - self.means) / self.scales
         ).astype("float32")
+        # Cheap safety net on the only block that could carry NaN or inf. Applied
+        # here, to 492 columns, rather than to the full 1,270-column matrix below:
+        # np.nan_to_num allocates a boolean mask the size of its input, which on
+        # the assembled matrix is a 162 MiB spike that exhausted memory mid-run.
+        np.nan_to_num(scaled, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
         onehot_blocks: list[np.ndarray] = []
         for col in self.categorical_columns:
@@ -182,7 +190,10 @@ class LinearPreprocessor:
             raise RuntimeError(
                 f"Width mismatch: produced {matrix.shape[1]}, expected {len(self.feature_names)}"
             )
-        return np.nan_to_num(matrix, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        # No NaN sweep here: medians are NaN-free by construction, zero-variance
+        # scales are clamped to 1.0 at fit, and the indicator and one-hot blocks
+        # are 0/1 by construction, so the assembled matrix is already finite.
+        return matrix
 
     def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
         return self.fit(df).transform(df)

@@ -42,6 +42,8 @@ class FeatureConfig:
     velocity_windows_hours: tuple[int, ...] = (1, 24, 168)
     frequency_encode_min_count: int = 2
     anchor_d_columns: bool = True
+    #: Suffixes dropped from the model input; used for feature ablations.
+    exclude_feature_suffixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,8 @@ def _feature_config(raw: dict[str, Any]) -> FeatureConfig:
     data = dict(raw)
     if "velocity_windows_hours" in data:
         data["velocity_windows_hours"] = tuple(data["velocity_windows_hours"])
+    if "exclude_feature_suffixes" in data:
+        data["exclude_feature_suffixes"] = tuple(data["exclude_feature_suffixes"])
     return FeatureConfig(**data)
 
 

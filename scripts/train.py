@@ -442,8 +442,13 @@ def main() -> int:
 
         # --- persist + register ---------------------------------------------
         artifact_path = artifact.save(ensure_dir(MODELS_DIR))
-        mlflow.log_artifact(str(artifact_path), artifact_path="model_artifact")
+        # Only the metadata sidecar is logged, not the bundle itself. The pickle is
+        # ~52 MB and MLflow keeps one copy per run, which exhausted the disk mid-run
+        # on this machine. The metadata carries the provenance that matters
+        # (versions, hyperparameters, metrics, feature config); the bundle lives at
+        # models/model_artifact.pkl and is reproducible from a seeded run.
         mlflow.log_artifact(str(MODELS_DIR / "model_metadata.json"), artifact_path="model_artifact")
+        mlflow.log_param("model_artifact_path", str(artifact_path.relative_to(MODELS_DIR.parent)))
 
         comparison = build_comparison(rows)
         comparison_path = save_comparison(comparison)
