@@ -1,8 +1,9 @@
 """Hyperparameter optimisation with Optuna.
 
-Scope is deliberately bounded. Only LightGBM — the production candidate — is
-tuned; spending compute tuning baselines whose job is to be a reference point
-would not change any decision. The budget is capped by both trial count and
+Scope is deliberately bounded. Only the boosted model that won cross-validation
+is tuned; spending compute on baselines whose job is to be a reference point
+would not change any decision. LightGBM and XGBoost have mirrored search spaces,
+so whichever wins is tuned on equal terms. The budget is capped by both trial count and
 wall-clock timeout, and each trial is scored on a **subset of the later temporal
 folds** rather than all of them: the early folds train on as little as 134k rows
 and are the least representative of the deployed model's situation, so tuning
@@ -86,19 +87,45 @@ def suggest_lightgbm_params(trial: optuna.Trial) -> dict[str, Any]:
     }
 
 
-def tune_lightgbm(
+def suggest_xgboost_params(trial: optuna.Trial) -> dict[str, Any]:
+    """Search space for XGBoost, mirrored to the LightGBM one.
+
+    Ranges correspond to their LightGBM counterparts so neither model is given a
+    wider or better-centred space than the other — the comparison should reflect
+    the algorithms, not the search.
+    """
+    return {
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+        "max_depth": trial.suggest_int("max_depth", 4, 12),
+        "min_child_weight": trial.suggest_float("min_child_weight", 1.0, 50.0, log=True),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.9),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+    }
+
+
+SEARCH_SPACES = {
+    "lightgbm": suggest_lightgbm_params,
+    "xgboost": suggest_xgboost_params,
+}
+
+
+def tune_model(
     prepared: pd.DataFrame,
     folds: list[tuple[np.ndarray, np.ndarray]],
+    model_name: str = "lightgbm",
     n_trials: int = 25,
     timeout_seconds: int | None = 1800,
     seed: int = 42,
     n_jobs: int = -1,
     tuning_folds: int = 2,
 ) -> TuningResult:
-    """Run a bounded Optuna study over LightGBM hyperparameters.
+    """Run a bounded Optuna study over one boosted model's hyperparameters.
 
     Args:
         prepared: Prepared modelling frame.
+        model_name: Which booster to tune ("lightgbm" or "xgboost").
         folds: All temporal folds; only the last ``tuning_folds`` are used.
         n_trials: Maximum trials.
         timeout_seconds: Wall-clock cap; ``None`` for no cap.
@@ -109,9 +136,14 @@ def tune_lightgbm(
     Returns:
         The best parameters and a record of every trial.
     """
+    if model_name not in SEARCH_SPACES:
+        raise ValueError(f"No search space defined for {model_name!r}")
+    suggest = SEARCH_SPACES[model_name]
+
     selected_folds = folds[-tuning_folds:] if tuning_folds else folds
     logger.info(
-        "Tuning LightGBM: <=%d trials, timeout %ss, %d fold(s) per trial",
+        "Tuning %s: <=%d trials, timeout %ss, %d fold(s) per trial",
+        model_name,
         n_trials,
         timeout_seconds,
         len(selected_folds),
@@ -120,12 +152,12 @@ def tune_lightgbm(
     started = time.perf_counter()
 
     def objective(trial: optuna.Trial) -> float:
-        params = suggest_lightgbm_params(trial)
+        params = suggest(trial)
         trial_started = time.perf_counter()
         result = train_cv(
             prepared,
             selected_folds,
-            "lightgbm",
+            model_name,
             seed=seed,
             n_jobs=n_jobs,
             params=params,
@@ -146,7 +178,7 @@ def tune_lightgbm(
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
-        study_name="lightgbm_pr_auc",
+        study_name=f"{model_name}_pr_auc",
     )
     study.optimize(objective, n_trials=n_trials, timeout=timeout_seconds, gc_after_trial=True)
 
@@ -164,3 +196,8 @@ def tune_lightgbm(
         result.best_params,
     )
     return result
+
+
+def tune_lightgbm(*args: Any, **kwargs: Any) -> TuningResult:
+    """Backwards-compatible alias for :func:`tune_model` with LightGBM."""
+    return tune_model(*args, model_name="lightgbm", **kwargs)

@@ -30,15 +30,22 @@ from typing import Any, Literal
 
 import lightgbm as lgb
 import numpy as np
+import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
 logger = logging.getLogger(__name__)
 
-ModelName = Literal["logistic_regression", "random_forest", "lightgbm"]
+ModelName = Literal["logistic_regression", "random_forest", "lightgbm", "xgboost"]
 
 #: Models that cannot accept NaN and therefore require the imputed matrix.
 REQUIRES_DENSE_IMPUTED: frozenset[str] = frozenset({"logistic_regression", "random_forest"})
+
+#: Models fitted with early stopping against an inner temporal slice.
+BOOSTED_MODELS: frozenset[str] = frozenset({"lightgbm", "xgboost"})
+
+#: Rounds without improvement before early stopping halts a boosted model.
+EARLY_STOPPING_ROUNDS = 100
 
 
 def scale_pos_weight(y: np.ndarray) -> float:
@@ -151,6 +158,106 @@ def make_logistic_regression(seed: int = 42, **overrides: Any) -> LogisticRegres
     return LogisticRegression(**params)
 
 
+def xgboost_params(
+    seed: int = 42,
+    n_jobs: int = -1,
+    imbalance_weight: float | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Baseline XGBoost parameters, mirrored to LightGBM's where they correspond.
+
+    The two libraries name the same ideas differently, so the defaults are chosen
+    to make the comparison about the algorithms rather than about who got a
+    luckier configuration:
+
+        LightGBM                XGBoost
+        feature_fraction 0.6 -> colsample_bytree 0.6
+        bagging_fraction 0.8 -> subsample 0.8
+        min_child_samples    -> min_child_weight
+        max_bin 127          -> max_bin 127
+
+    ``tree_method="hist"`` with ``enable_categorical=True`` lets XGBoost consume
+    the same pandas ``category`` columns LightGBM uses, so neither model gets a
+    different feature representation. ``eval_metric="aucpr"`` matches the
+    project's selection metric.
+    """
+    params: dict[str, Any] = {
+        "objective": "binary:logistic",
+        "eval_metric": "aucpr",
+        "tree_method": "hist",
+        "enable_categorical": True,
+        "max_cat_to_onehot": 4,
+        "learning_rate": 0.05,
+        "max_depth": 8,
+        "min_child_weight": 5.0,
+        "colsample_bytree": 0.6,
+        "subsample": 0.8,
+        "reg_alpha": 0.0,
+        "reg_lambda": 1.0,
+        "max_bin": 127,
+        "n_estimators": 2000,
+        "early_stopping_rounds": 100,
+        "random_state": seed,
+        "n_jobs": n_jobs,
+        "verbosity": 0,
+    }
+    if imbalance_weight is not None:
+        params["scale_pos_weight"] = imbalance_weight
+    params.update(overrides)
+    return params
+
+
+def make_xgboost(
+    seed: int = 42,
+    n_jobs: int = -1,
+    imbalance_weight: float | None = None,
+    **overrides: Any,
+) -> xgb.XGBClassifier:
+    """Build an XGBoost classifier."""
+    return xgb.XGBClassifier(
+        **xgboost_params(seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides)
+    )
+
+
+def fit_with_early_stopping(
+    model: Any,
+    model_name: str,
+    X_train: Any,
+    y_train: Any,
+    X_eval: Any,
+    y_eval: Any,
+    categorical_features: list[str],
+) -> int:
+    """Fit a boosted model against a held-back eval slice; return best iteration.
+
+    LightGBM and XGBoost express early stopping differently — callbacks versus a
+    constructor argument — so the difference is absorbed here rather than
+    branching inside the training loop.
+    """
+    if model_name == "lightgbm":
+        model.fit(
+            X_train,
+            y_train,
+            eval_X=X_eval,
+            eval_y=y_eval,
+            eval_metric="average_precision",
+            callbacks=[
+                lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                lgb.log_evaluation(0),
+            ],
+            categorical_feature=categorical_features,
+        )
+        return int(getattr(model, "best_iteration_", 0) or 0)
+
+    if model_name == "xgboost":
+        # early_stopping_rounds and eval_metric are set on the constructor in
+        # the XGBoost 2.x+ sklearn API; categoricals come from the dtype.
+        model.fit(X_train, y_train, eval_set=[(X_eval, y_eval)], verbose=False)
+        return int(getattr(model, "best_iteration", 0) or 0)
+
+    raise ValueError(f"{model_name!r} does not support early stopping here")
+
+
 def build_model(
     name: ModelName,
     seed: int = 42,
@@ -161,6 +268,10 @@ def build_model(
     """Dispatch to the requested model factory."""
     if name == "lightgbm":
         return make_lightgbm(
+            seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides
+        )
+    if name == "xgboost":
+        return make_xgboost(
             seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides
         )
     if name == "random_forest":

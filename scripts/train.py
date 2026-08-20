@@ -56,7 +56,7 @@ from src.models.artifact import (  # noqa: E402
     utc_now_iso,
 )
 from src.models.training import CVResult, train_cv, train_final  # noqa: E402
-from src.models.tuning import tune_lightgbm  # noqa: E402
+from src.models.tuning import SEARCH_SPACES, tune_model  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.utils.logging_config import setup_logging  # noqa: E402
 from src.utils.paths import (  # noqa: E402
@@ -70,7 +70,7 @@ from src.utils.seed import set_seed  # noqa: E402
 
 logger = logging.getLogger("train")
 
-DEFAULT_MODELS = ("logistic_regression", "random_forest", "lightgbm")
+DEFAULT_MODELS = ("logistic_regression", "random_forest", "lightgbm", "xgboost")
 
 #: Row cap for models needing a dense imputed matrix. A 472,432 x ~1,100 dense
 #: float32 one-hot matrix is ~2 GB and does not fit this machine's headroom, so
@@ -244,10 +244,11 @@ def main() -> int:
 
         # --- tuning ---------------------------------------------------------
         best_params: dict[str, object] = {}
-        if not args.no_tune and best_name == "lightgbm":
-            tuning = tune_lightgbm(
+        if not args.no_tune and best_name in SEARCH_SPACES:
+            tuning = tune_model(
                 modelling,
                 temporal_folds,
+                model_name=best_name,
                 n_trials=args.trials or config.train.optuna_trials,
                 timeout_seconds=config.train.optuna_timeout_seconds,
                 seed=config.train.seed,
@@ -264,17 +265,17 @@ def main() -> int:
             tuned = train_cv(
                 modelling,
                 temporal_folds,
-                "lightgbm",
+                best_name,
                 seed=config.train.seed,
                 n_jobs=config.train.n_jobs,
                 params=best_params,
             )
             tuned_row = cv_result_row(tuned)
-            tuned_row["model"] = "lightgbm_tuned"
+            tuned_row["model"] = f"{best_name}_tuned"
             rows.append(tuned_row)
             _log_cv_result(mlflow, tuned)
             if tuned.mean_metric("pr_auc") > cv_results[best_name].mean_metric("pr_auc"):
-                cv_results["lightgbm_tuned"] = tuned
+                cv_results[f"{best_name}_tuned"] = tuned
                 logger.info(
                     "Tuning improved CV PR-AUC %.4f -> %.4f",
                     cv_results[best_name].mean_metric("pr_auc"),
@@ -289,7 +290,7 @@ def main() -> int:
                 best_params = {}
 
         # --- calibration + threshold from the last fold ---------------------
-        selected_cv = cv_results.get("lightgbm_tuned", cv_results[best_name])
+        selected_cv = cv_results.get(f"{best_name}_tuned", cv_results[best_name])
         last_train_idx, last_val_idx = temporal_folds[-1]
         oof = selected_cv.oof_predictions
         if oof is None:
@@ -335,7 +336,7 @@ def main() -> int:
 
         # --- final fit on the whole modelling period ------------------------
         logger.info("=" * 70)
-        final_name = "lightgbm" if best_name == "lightgbm" else best_name
+        final_name = best_name
         started = time.perf_counter()
         model, pipeline, linear_prep, best_iteration = train_final(
             modelling,
@@ -379,7 +380,7 @@ def main() -> int:
 
         # --- SHAP -----------------------------------------------------------
         shap_importance_path = None
-        if final_name == "lightgbm":
+        if final_name in SEARCH_SPACES:
             logger.info("Computing SHAP explanations")
             # Sample rows *before* transforming: transforming all 472k rows to
             # then keep 5,000 wastes several minutes and ~1 GB for no gain.

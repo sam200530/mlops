@@ -21,7 +21,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
@@ -33,6 +32,7 @@ from src.models.estimators import (
     REQUIRES_DENSE_IMPUTED,
     ModelName,
     build_model,
+    fit_with_early_stopping,
     scale_pos_weight,
 )
 
@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 #: Fraction of a fold's training rows (latest by time) held back for early
 #: stopping. Temporal, not random, for the same reason the outer split is.
 EARLY_STOPPING_FRACTION = 0.10
-EARLY_STOPPING_ROUNDS = 100
 
 
 @dataclass
@@ -171,19 +170,15 @@ def _fit_one(
             imbalance_weight=scale_pos_weight(y_train),
             **(params or {}),
         )
-        model.fit(
+        best_iteration = fit_with_early_stopping(
+            model,
+            model_name,
             X_train.iloc[head],
             y_train[head],
-            eval_X=X_train.iloc[tail],
-            eval_y=y_train[tail],
-            eval_metric="average_precision",
-            callbacks=[
-                lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
-                lgb.log_evaluation(0),
-            ],
-            categorical_feature=pipeline.categorical_features,
+            X_train.iloc[tail],
+            y_train[tail],
+            pipeline.categorical_features,
         )
-        best_iteration = int(getattr(model, "best_iteration_", 0) or 0)
         probabilities = model.predict_proba(X_validation)[:, 1]
         n_features = X_train.shape[1]
         del X_train, X_validation
@@ -320,19 +315,15 @@ def train_final(
             imbalance_weight=scale_pos_weight(y),
             **(params or {}),
         )
-        model.fit(
+        best_iteration = fit_with_early_stopping(
+            model,
+            model_name,
             X.iloc[head],
             y[head],
-            eval_X=X.iloc[tail],
-            eval_y=y[tail],
-            eval_metric="average_precision",
-            callbacks=[
-                lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
-                lgb.log_evaluation(0),
-            ],
-            categorical_feature=pipeline.categorical_features,
+            X.iloc[tail],
+            y[tail],
+            pipeline.categorical_features,
         )
-        best_iteration = int(getattr(model, "best_iteration_", 0) or 0)
         del X
 
     gc.collect()

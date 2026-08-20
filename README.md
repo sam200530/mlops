@@ -215,10 +215,16 @@ serving system.
 
 ## Model Comparison
 
-All three models on **identical persisted folds**, from a full run
+Models are compared on **identical persisted folds**, from a full run
 (`python scripts/train.py --random-cv-control`). Every figure below is retained in
 MLflow; `reports/model_comparison.csv` is regenerated on each run and therefore
-reflects whatever was executed last, so the table here is the canonical record:
+reflects whatever was executed last, so the table here is the canonical record.
+
+> **XGBoost is in the roster but not yet in this table.** It was added after this
+> run, with hyperparameters mirrored to LightGBM's and the same native categorical
+> handling, so the comparison measures the algorithms rather than the setup.
+> Whichever booster wins cross-validation is the one Optuna tunes. The table below
+> will be regenerated on the next full run rather than estimated here.
 
 | model | CV PR-AUC | lift | ROC-AUC | precision | recall | F1 | Brier | P@top 1% | train time |
 |---|---|---|---|---|---|---|---|---|---|

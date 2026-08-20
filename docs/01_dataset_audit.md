@@ -468,12 +468,16 @@ flowchart TB
 
 **Component decisions, including what was cut:**
 
-- **XGBoost — considered and rejected.** It and LightGBM land in the same accuracy
-  neighbourhood on tabular data, so running both doubles tuning cost to produce a
-  second number that changes no decision. LightGBM wins on *this* data
-  specifically: native categorical support (`ProductCD`, `card4/6`, `M1`–`M9`,
-  `id_12/15/16/…`), native NaN routing (essential at 43% mean missingness in the
-  V block), and speed at 590k × 530.
+- **XGBoost — initially rejected, later included.** The original argument was
+  that it and LightGBM land in the same accuracy neighbourhood on tabular data,
+  so running both doubles tuning cost for a number that changes no decision.
+  That reasoning holds only if the claim is true, and it was never tested here.
+  Both are now compared on identical folds with mirrored hyperparameters and the
+  same categorical handling (`tree_method="hist"` with `enable_categorical=True`,
+  so neither gets a different feature representation), and whichever wins
+  cross-validation is the one Optuna tunes. An assumption that costs one CV run
+  to check is cheaper to measure than to argue about.
+
 - **Redis — built, then removed.** It served online velocity features, a
   prediction cache and rate limiting. None was ever exercised against a live
   server, and the model contract survives without it (see above).
