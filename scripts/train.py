@@ -72,12 +72,18 @@ logger = logging.getLogger("train")
 
 DEFAULT_MODELS = ("logistic_regression", "random_forest", "lightgbm", "xgboost")
 
-#: Row cap for models needing a dense imputed matrix. A 472,432 x ~1,100 dense
-#: float32 one-hot matrix is ~2 GB and does not fit this machine's headroom, so
-#: Logistic Regression and Random Forest are fitted on a capped, positive-
-#: preserving subsample. Recorded in model_comparison.csv so the comparison is
-#: not silently unequal.
-DENSE_MODEL_MAX_ROWS = 150_000
+#: Row cap for models needing a dense imputed matrix. Logistic Regression and
+#: Random Forest cannot take NaN, so they are fitted on a dense one-hot matrix
+#: roughly 970 columns wide (after identical missingness indicators are
+#: collapsed). At 133,979 rows that is ~520 MB, and a contiguous block that large
+#: failed to allocate on this machine even with ~4.9 GB free, because the address
+#: space fragments across folds. 100,000 rows keeps it near 390 MB.
+#:
+#: The subsample preserves every positive and downsamples negatives, and both the
+#: row count and the `subsampled` flag are recorded in model_comparison.csv, so
+#: the comparison is visibly unequal rather than silently so. LightGBM and
+#: XGBoost use every row, since they consume NaN and categoricals natively.
+DENSE_MODEL_MAX_ROWS = 100_000
 
 
 def _raw_input_columns() -> list[str]:

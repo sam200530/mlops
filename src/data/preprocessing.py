@@ -122,7 +122,24 @@ class LinearPreprocessor:
         self.medians = numeric.median(numeric_only=False).fillna(0.0)
         # Only columns that actually have nulls get an indicator — an all-present
         # column's indicator would be a constant zero feature.
-        self.indicator_columns = [c for c in self.numeric_columns if numeric[c].isna().any()]
+        candidates = [c for c in self.numeric_columns if numeric[c].isna().any()]
+        # ...and identical missing patterns are collapsed to one column. On this
+        # dataset 361 candidates carry only 58 distinct patterns, because the V
+        # block appears and vanishes in groups (one pattern is shared by 50
+        # columns). Duplicates are exactly redundant for a linear model, and
+        # dropping them cuts the dense matrix width by ~24%, which is the
+        # difference between fitting in memory and not.
+        seen: dict[bytes, str] = {}
+        for column in candidates:
+            key = numeric[column].isna().to_numpy().tobytes()
+            seen.setdefault(key, column)
+        self.indicator_columns = list(seen.values())
+        if len(candidates) != len(self.indicator_columns):
+            logger.info(
+                "Missingness indicators: %d columns -> %d distinct patterns",
+                len(candidates),
+                len(self.indicator_columns),
+            )
 
         self.onehot_vocab = {}
         for col in self.categorical_columns:
@@ -155,44 +172,60 @@ class LinearPreprocessor:
         return self
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
+        """Build the dense matrix by filling one preallocated array in place.
+
+        The obvious implementation builds each block, then ``np.hstack``es them,
+        which holds the blocks *and* the result alive at once — roughly double the
+        peak. At 133,979 x 1,270 float32 that second copy is 649 MiB, and it
+        failed on this machine even with ~4.9 GB free, because a single
+        contiguous block that large is hard to place once the address space has
+        been fragmented by repeated per-fold allocations.
+
+        Writing each block straight into its column slice of one preallocated
+        array avoids the duplicate entirely, and lets each temporary be released
+        as soon as it is copied.
+        """
         if self.medians is None or self.means is None or self.scales is None:
             raise RuntimeError("LinearPreprocessor.transform called before fit")
 
+        n_rows = len(df)
+        matrix = np.zeros((n_rows, len(self.feature_names)), dtype="float32")
         numeric = df[self.numeric_columns]
-        indicators = (
-            numeric[self.indicator_columns].isna().to_numpy(dtype="float32")
-            if self.indicator_columns
-            else np.empty((len(df), 0), dtype="float32")
-        )
+        cursor = 0
+
+        # --- scaled numeric block ------------------------------------------
         scaled = (
             (numeric.fillna(self.medians).to_numpy(dtype="float32") - self.means) / self.scales
         ).astype("float32")
-        # Cheap safety net on the only block that could carry NaN or inf. Applied
-        # here, to 492 columns, rather than to the full 1,270-column matrix below:
-        # np.nan_to_num allocates a boolean mask the size of its input, which on
-        # the assembled matrix is a 162 MiB spike that exhausted memory mid-run.
+        # Guard the only block that could carry NaN or inf. Medians are NaN-free
+        # by construction and zero-variance scales are clamped to 1.0 at fit, so
+        # this is a safety net rather than a routine correction.
         np.nan_to_num(scaled, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        matrix[:, cursor : cursor + scaled.shape[1]] = scaled
+        cursor += scaled.shape[1]
+        del scaled
 
-        onehot_blocks: list[np.ndarray] = []
-        for col in self.categorical_columns:
-            vocab = self.onehot_vocab[col]
-            values = df[col]
-            block = np.zeros((len(df), len(vocab) + 1), dtype="float32")
-            for j, value in enumerate(vocab):
-                block[:, j] = (values == value).to_numpy(dtype="float32")
+        # --- missingness indicators ----------------------------------------
+        for column in self.indicator_columns:
+            matrix[:, cursor] = numeric[column].isna().to_numpy(dtype="float32")
+            cursor += 1
+
+        # --- one-hot blocks -------------------------------------------------
+        for column in self.categorical_columns:
+            vocab = self.onehot_vocab[column]
+            values = df[column]
+            first = cursor
+            for value in vocab:
+                matrix[:, cursor] = (values == value).to_numpy(dtype="float32")
+                cursor += 1
             # Final column absorbs rare + unseen + missing levels.
-            block[:, -1] = (block[:, :-1].sum(axis=1) == 0).astype("float32")
-            onehot_blocks.append(block)
+            matrix[:, cursor] = (matrix[:, first:cursor].sum(axis=1) == 0).astype("float32")
+            cursor += 1
 
-        parts = [scaled, indicators, *onehot_blocks]
-        matrix = np.hstack([p for p in parts if p.shape[1] > 0])
-        if matrix.shape[1] != len(self.feature_names):
+        if cursor != len(self.feature_names):
             raise RuntimeError(
-                f"Width mismatch: produced {matrix.shape[1]}, expected {len(self.feature_names)}"
+                f"Width mismatch: filled {cursor}, expected {len(self.feature_names)}"
             )
-        # No NaN sweep here: medians are NaN-free by construction, zero-variance
-        # scales are clamped to 1.0 at fit, and the indicator and one-hot blocks
-        # are 0/1 by construction, so the assembled matrix is already finite.
         return matrix
 
     def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
