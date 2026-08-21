@@ -467,6 +467,40 @@ reintroduced through the back door exactly the risk the audit had documented —
 `D1_anchored` still ranks 3rd by SHAP, because the holdout is adjacent to training
 and hides the problem.
 
+### Ablation: what the anchored features are actually worth
+
+The drift finding raised an obvious question — if these features are broken, why
+does the model rank them so highly? Removing them and re-measuring answers it.
+Run with `scripts/run_ablation.py` against
+`configs/config_ablation_no_anchored.yaml`, same folds, same seed, LightGBM:
+
+| fold | 530 features | 515 (no `_anchored`) | Δ |
+|---|---|---|---|
+| 0 | 0.5338 | 0.5335 | −0.0003 |
+| 1 | 0.5473 | 0.5575 | +0.0102 |
+| 2 | 0.5683 | 0.5496 | −0.0187 |
+| 3 | 0.5448 | 0.5350 | −0.0098 |
+| 4 | 0.5973 | 0.5583 | **−0.0390** |
+| **mean** | **0.5583 ± 0.0251** | **0.5468 ± 0.0120** | **−0.0115 (−2.1%)** |
+
+**Removing them costs 0.0115 PR-AUC in-period, losing 4 of 5 folds.** That is not
+a contradiction of the drift result — it is the mechanism behind it. Every CV fold
+validates on a slice *inside* the training period, where an absolute-time anchor
+still lines up. The features genuinely work there, which is exactly why the model
+leans on them and why SHAP ranks `D1_anchored` third.
+
+Two details sharpen the point. The largest loss is **fold 4 (−0.0390)**, the latest
+and best-performing fold — the anchor pays most where train and validation are
+closest in time. And the ablated model's fold-to-fold spread is **less than half**
+the baseline's (± 0.0120 vs ± 0.0251): dropping the features makes performance
+markedly more stable across time periods, which is what removing a time-sensitive
+crutch looks like.
+
+So the 0.0115 is not a gain to protect — it is the size of the trap. In-period
+validation pays for these features; the true test period (days 213–396, KS up to
+1.000) would not. This is the clearest example in the project of a feature that
+improves every number you can measure before deployment and fails after it.
+
 That a monitoring system built for this project found a genuine flaw in the
 project's own features, rather than reporting a reassuring all-clear, is the
 strongest evidence that the monitoring is real.
@@ -608,8 +642,11 @@ No MLflow server is required.
    derives from absolute time. They rank highly by SHAP and the holdout metrics
    include them, because the holdout is adjacent in time to training and hides the
    problem. **Holdout performance should be read as optimistic for a
-   30-day-forward deployment.** Documented rather than quietly patched, because a
-   measurement — not a guess — identified it.
+   30-day-forward deployment.** The ablation in
+   [Drift Monitoring](#drift-monitoring) quantifies it: the features are worth
+   +0.0115 PR-AUC in-period and lose 4 of 5 folds when removed, which is precisely
+   why the defect is invisible to every pre-deployment metric. Documented rather
+   than quietly patched, because a measurement — not a guess — identified it.
 
 2. **Velocity features are cold-started at serving time.** The API keeps no
    transaction history, so trailing-window counts are computed from the request
@@ -666,8 +703,11 @@ Roughly in order of value per unit of effort:
 1. **Remove or reformulate `D*_anchored` and retrain.** They measurably harm
    temporal generalisation. Either drop them (the raw `D` columns are stable and
    already present) or re-express the anchor relative to the transaction rather
-   than to an absolute day index. The comparison must be rerun, since this changes
-   the feature set behind the reported metrics.
+   than to an absolute day index. The ablation above prices the decision: dropping
+   them costs **0.0115 in-period PR-AUC** and halves fold-to-fold variance, so the
+   reformulation is the better of the two options — it should recover the signal
+   without the absolute-time dependence. The comparison must be rerun, since this
+   changes the feature set behind the reported metrics.
 2. **A feature store for velocity**, so serving and training share one definition
    and cold starts do not degrade the first requests.
 3. **Adversarial validation to prune shift-heavy features** — 181 of 507 already
