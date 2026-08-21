@@ -35,6 +35,12 @@ def main() -> int:
     parser.add_argument("--fold", type=int, required=True)
     parser.add_argument("--label", required=True)
     parser.add_argument("--model", default="lightgbm")
+    parser.add_argument(
+        "--force-subsample",
+        type=int,
+        default=None,
+        help="Cap training rows, to compare a booster at the dense baselines' row count.",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -52,6 +58,8 @@ def main() -> int:
         seed=config.train.seed,
         n_jobs=config.train.n_jobs,
         exclude_feature_suffixes=config.features.exclude_feature_suffixes,
+        max_dense_rows=args.force_subsample,
+        force_subsample=args.force_subsample is not None,
     )
     fold_result = result.fold_results[0]
     m = fold_result.metrics

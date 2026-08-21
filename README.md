@@ -156,13 +156,44 @@ least as wide as the longest velocity look-back (168 h), because otherwise a
 trailing aggregate computed at the start of a validation block reaches back into
 training rows even though the *rows* are separated.
 
-| fold | train rows | train fraud | val rows | val fraud |
-|---|---|---|---|---|
-| 0 | 54,466 | — | 78,739 | — |
-| 1 | 133,979 | 2.5288% | 78,739 | 4.1974% |
-| 2 | 214,078 | 3.0517% | 78,738 | 3.9396% |
-| 3 | 293,305 | 3.3481% | 78,739 | 3.7085% |
-| 4 | 372,880 | 3.4030% | 78,739 | 3.8342% |
+**In one sentence: fold N trains on days 1 to X, waits 7 days, then validates on
+days X+7 onward. Nothing is shuffled, no validation row precedes any training row
+in time, and the training window only ever grows forward.**
+
+```
+day  1                                                                   141
+     |------------------------------------------------------------------|
+f0   [train 1-12.8 ]<-7d->[ val 19.8-37.9 ]
+f1   [train 1-30.9        ]<-7d->[ val 37.9-64.7 ]
+f2   [train 1-57.7               ]<-7d->[ val 64.7-90.8 ]
+f3   [train 1-83.8                      ]<-7d->[ val 90.8-114.6 ]
+f4   [train 1-107.6                            ]<-7d->[ val 114.6-141.1 ]
+```
+
+| fold | train rows | train days | val rows | val days | purge gap | overlap |
+|---|---|---|---|---|---|---|
+| 0 | 46,274 | 1.0 – 12.8 | 78,739 | 19.8 – 37.9 | **7.0 d** | none |
+| 1 | 133,979 | 1.0 – 30.9 | 78,739 | 37.9 – 64.7 | **7.0 d** | none |
+| 2 | 214,078 | 1.0 – 57.7 | 78,738 | 64.7 – 90.8 | **7.0 d** | none |
+| 3 | 293,305 | 1.0 – 83.8 | 78,739 | 90.8 – 114.6 | **7.0 d** | none |
+| 4 | 372,880 | 1.0 – 107.6 | 78,739 | 114.6 – 141.1 | **7.0 d** | none |
+
+Boundaries are read back off the persisted folds rather than asserted from the
+code that wrote them. Four properties hold on every fold, and all four are
+verified rather than claimed:
+
+| property | result |
+|---|---|
+| Every validation start > every train end | **True** |
+| Train / validation index overlap | **none** |
+| Rows time-ordered within each training window | **True** |
+| Training windows expand monotonically | 46,274 → 133,979 → 214,078 → 293,305 → 372,880 |
+
+How the boundary is enforced: folds are cut on **timestamp edges**, persisted once
+to `data/processed/folds_temporal.npz`, and reused byte-identically by every model,
+so no model can be scored on a different split. `_assert_disjoint_in_time` fails the
+run if a timestamp appears in two partitions, and the 7-day purge is applied by
+*index position*, not by sampling — there is no shuffle anywhere in the path.
 
 Validation fraud rate exceeds training fraud rate in *every* fold — a structural
 property random folds would average away.
@@ -256,11 +287,46 @@ average, it is ~3× more volatile across time periods.
 near-identical ROC-AUC. This matters because the API serves probabilities, not
 only rankings.
 
-Three caveats stated rather than hidden. Logistic Regression and Random Forest were
-fitted on **100,000 rows** (all positives kept, negatives downsampled) because
-their one-hot matrices are 929 features wide and a 472k-row dense float32 matrix
-does not fit this machine; LightGBM and XGBoost used every row with 530 native
-features. Tuning gained **+0.0171 PR-AUC** from **8 of 25 Optuna trials** in
+### The row-count confound, measured rather than waved away
+
+Logistic Regression and Random Forest are fitted on **100,000 rows** (all
+positives kept, negatives downsampled) because their one-hot matrices are 929
+features wide; LightGBM and XGBoost use every row with 530 native features. That
+is a genuine confound — the baselines could be losing on data volume rather than
+on model class.
+
+Rather than argue about it, the boosters were rerun **at the baselines' row
+count** (`--force-subsample 100000`, same folds, same seed):
+
+| fold | LightGBM full | LightGBM @100k | cost |
+|---|---|---|---|
+| 0 | 0.5338 | 0.5338 | 0.0000 |
+| 1 | 0.5473 | 0.5484 | +0.0011 |
+| 2 | 0.5683 | 0.5586 | −0.0097 |
+| 3 | 0.5448 | 0.5567 | +0.0119 |
+| 4 | 0.5973 | 0.5805 | −0.0168 |
+| **mean** | **0.5583** | **0.5556** | **−0.0027** |
+
+At equal data, LightGBM scores **0.5556** against Random Forest's 0.4677 and
+Logistic Regression's 0.3560:
+
+| comparison | value |
+|---|---|
+| Cost of subsampling to LightGBM | **0.0027** |
+| LightGBM margin over Random Forest | **0.0879** (**33× larger**) |
+| LightGBM margin over Logistic Regression | **0.1996** (74× larger) |
+
+**The ranking is not an artefact of training-set size.** Fold 0 is identical in
+both columns because its training window holds 46,274 rows — below the cap — which
+confirms the flag does nothing when it should do nothing.
+
+Why not simply fit the baselines on all 472k rows with a sparse matrix? Because
+sparse is *worse* here. After median-fill the 492 numeric columns have almost no
+zeros, so CSR pays 8 bytes per nonzero (4-byte value + 4-byte index) where dense
+pays 4: **1.98 GB sparse against 1.62 GB dense.** Sparse storage only wins when
+the numeric block itself is sparse; here only the 430-column one-hot block is.
+The honest fix is more RAM or an out-of-core solver, not a storage change — and
+the equal-data control above answers the question without needing either. Tuning gained **+0.0171 PR-AUC** from **8 of 25 Optuna trials** in
 5964.4 s — the wall-clock cap stopped the search, not convergence, so 0.5754 is a
 lightly-searched improvement rather than a converged optimum. Finally, the tuned
 model hit the 2,000-round ceiling on 3 of 5 folds, meaning the round cap rather
@@ -327,6 +393,21 @@ What this means operationally:
 - **Calibration is real**: isotonic cut expected calibration error from 0.00668 to
   0.00000 on validation (Brier 0.02174 → 0.02109), and it held out of sample —
   holdout ECE 0.00338 and holdout Brier 0.0204, *below* validation's 0.0211.
+
+**Holdout PR-AUC 0.5639, 95% CI [0.5488, 0.5786]** (SE 0.0077, 2,000 stratified
+bootstrap resamples, `bootstrap_metric_ci` in `src/evaluation/metrics.py`).
+ROC-AUC 0.9117, 95% CI [0.9063, 0.9170].
+
+**That interval contains the tuned CV mean of 0.5754**, so the holdout is
+statistically indistinguishable from the cross-validation estimate — the apparent
+drop is sampling noise, not degradation. Quoting a bare point estimate against a
+CV band would have left that ambiguous in either direction.
+
+Resampling is stratified within the positive and negative classes so every draw
+holds prevalence fixed. Resampling pooled rows would let the fraud rate wander
+between draws, and PR-AUC moves with prevalence by construction, which would
+inflate the interval with an artefact of the procedure rather than uncertainty
+about the model.
 
 **Holdout (0.5639) sits below validation (0.6069) and within one SD of the
 temporal CV mean (0.5754 ± 0.0239).** That small drop is the expected, honest

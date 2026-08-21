@@ -147,6 +147,7 @@ def _fit_one(
     params: dict[str, Any] | None,
     max_dense_rows: int | None,
     exclude_feature_suffixes: tuple[str, ...] = (),
+    force_subsample: bool = False,
 ) -> tuple[np.ndarray, int, int | None, bool, Any, FeaturePipeline, LinearPreprocessor | None]:
     """Fit one model on one fold and predict on its validation rows."""
     pipeline = FeaturePipeline(exclude_feature_suffixes=exclude_feature_suffixes)
@@ -155,7 +156,7 @@ def _fit_one(
     needs_dense = model_name in REQUIRES_DENSE_IMPUTED
     subsampled = False
     fit_df = train_df
-    if needs_dense:
+    if needs_dense or force_subsample:
         fit_df, subsampled = _subsample_training_rows(train_df, max_dense_rows, seed)
 
     X_train = pipeline.transform(fit_df)
@@ -216,6 +217,7 @@ def train_cv(
     params: dict[str, Any] | None = None,
     max_dense_rows: int | None = None,
     exclude_feature_suffixes: tuple[str, ...] = (),
+    force_subsample: bool = False,
 ) -> CVResult:
     """Cross-validate one model over pre-computed folds.
 
@@ -231,6 +233,9 @@ def train_cv(
         max_dense_rows: Row cap for models requiring a dense imputed matrix.
         exclude_feature_suffixes: Feature suffixes to drop, for ablations. The
             encoders are still fitted per fold, so an ablation stays leakage-safe.
+        force_subsample: Apply the dense-model row cap to a model that does not
+            need it. Used only to run the boosters at the baselines' row count,
+            which removes training-set size as a confound in the comparison.
 
     Returns:
         A :class:`CVResult` with per-fold metrics and out-of-fold predictions.
@@ -260,6 +265,7 @@ def train_cv(
             params=params,
             max_dense_rows=max_dense_rows,
             exclude_feature_suffixes=exclude_feature_suffixes,
+            force_subsample=force_subsample,
         )
         elapsed = time.perf_counter() - started
 

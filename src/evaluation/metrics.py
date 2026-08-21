@@ -226,3 +226,66 @@ def expected_calibration_error(y_true: np.ndarray, y_prob: np.ndarray, n_bins: i
     observed = np.array(table["observed_rate"])
     counts = np.array(table["count"])
     return float((counts * np.abs(predicted - observed)).sum() / counts.sum())
+
+
+def bootstrap_metric_ci(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    metric: str = "pr_auc",
+    n_resamples: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Percentile bootstrap confidence interval for a ranking metric.
+
+    A holdout PR-AUC is a single point estimate over one finite sample, so on
+    its own it cannot be compared honestly against a cross-validation band. The
+    bootstrap answers the missing question: how much of the gap between holdout
+    and CV is sampling noise rather than genuine degradation?
+
+    Resampling is **stratified** — positives and negatives are resampled within
+    their own strata — so every resample holds the prevalence fixed. Resampling
+    the pooled rows instead would let the fraud rate wander between draws, and
+    PR-AUC moves with prevalence by construction, which would widen the interval
+    with an artefact of the procedure rather than uncertainty about the model.
+
+    Args:
+        y_true: Binary labels.
+        y_prob: Predicted scores.
+        metric: ``"pr_auc"`` or ``"roc_auc"``.
+        n_resamples: Bootstrap draws.
+        alpha: Two-sided level; 0.05 gives a 95% interval.
+        seed: Seed, so the interval is reproducible.
+
+    Returns:
+        Point estimate, interval bounds, bootstrap mean and standard error.
+    """
+    scorer = average_precision_score if metric == "pr_auc" else roc_auc_score
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+
+    positive_idx = np.flatnonzero(y_true == 1)
+    negative_idx = np.flatnonzero(y_true == 0)
+    rng = np.random.default_rng(seed)
+
+    draws = np.empty(n_resamples, dtype="float64")
+    for i in range(n_resamples):
+        take = np.concatenate(
+            (
+                rng.choice(positive_idx, size=positive_idx.size, replace=True),
+                rng.choice(negative_idx, size=negative_idx.size, replace=True),
+            )
+        )
+        draws[i] = scorer(y_true[take], y_prob[take])
+
+    lower, upper = np.quantile(draws, [alpha / 2, 1 - alpha / 2])
+    return {
+        "metric": metric,
+        "point": float(scorer(y_true, y_prob)),
+        "ci_lower": float(lower),
+        "ci_upper": float(upper),
+        "bootstrap_mean": float(draws.mean()),
+        "standard_error": float(draws.std(ddof=1)),
+        "n_resamples": int(n_resamples),
+        "level": float(1 - alpha),
+    }

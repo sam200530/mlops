@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.schema import TARGET  # noqa: E402
 from src.evaluation.metrics import (  # noqa: E402
+    bootstrap_metric_ci,
     calibration_table,
     compute_metrics,
     expected_calibration_error,
@@ -90,6 +91,23 @@ def main() -> int:
         metrics.precision_at_budget.get("top_5pct", float("nan")),
     )
 
+    pr_ci = bootstrap_metric_ci(y_true, y_prob, metric="pr_auc")
+    roc_ci = bootstrap_metric_ci(y_true, y_prob, metric="roc_auc")
+    logger.info(
+        "PR-AUC %.4f  95%% CI [%.4f, %.4f]  (SE %.4f, %d stratified resamples)",
+        pr_ci["point"],
+        pr_ci["ci_lower"],
+        pr_ci["ci_upper"],
+        pr_ci["standard_error"],
+        pr_ci["n_resamples"],
+    )
+    logger.info(
+        "ROC-AUC %.4f  95%% CI [%.4f, %.4f]",
+        roc_ci["point"],
+        roc_ci["ci_lower"],
+        roc_ci["ci_upper"],
+    )
+
     ece = expected_calibration_error(y_true, y_prob)
     logger.info(
         "Expected calibration error: %.6f (calibrated=%s)", ece, artifact.metadata.calibrated
@@ -108,6 +126,7 @@ def main() -> int:
         "decision_threshold": threshold,
         "expected_calibration_error": ece,
         "metrics": metrics.to_flat_dict(),
+        "bootstrap_ci": {"pr_auc": pr_ci, "roc_auc": roc_ci},
         "calibration_table": calibration_table(y_true, y_prob),
         "figures": [str(p.relative_to(REPORTS_DIR.parent)) for p in figures],
     }
