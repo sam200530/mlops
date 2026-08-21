@@ -72,3 +72,6 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Generated Kaggle submission (15 MB, reproducible via kaggle/make_submission.py)
+kaggle/submission.csv
