@@ -192,9 +192,7 @@ class FeaturePipeline:
         ]
         if self.exclude_feature_suffixes:
             before = len(selected)
-            selected = [
-                c for c in selected if not c.endswith(tuple(self.exclude_feature_suffixes))
-            ]
+            selected = [c for c in selected if not c.endswith(tuple(self.exclude_feature_suffixes))]
             logger.info(
                 "Excluded %d features by suffix %s (%d -> %d)",
                 before - len(selected),

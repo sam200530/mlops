@@ -61,13 +61,32 @@ def main() -> int:
     with out.open("a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         if is_new:
-            writer.writerow(["label", "model", "fold", "pr_auc", "roc_auc", "precision", "recall", "f1", "n_features"])
-        writer.writerow([
-            args.label, args.model, args.fold,
-            f"{m.pr_auc:.6f}", f"{m.roc_auc:.6f}",
-            f"{m.precision:.6f}", f"{m.recall:.6f}", f"{m.f1:.6f}",
-            fold_result.n_features,
-        ])
+            writer.writerow(
+                [
+                    "label",
+                    "model",
+                    "fold",
+                    "pr_auc",
+                    "roc_auc",
+                    "precision",
+                    "recall",
+                    "f1",
+                    "n_features",
+                ]
+            )
+        writer.writerow(
+            [
+                args.label,
+                args.model,
+                args.fold,
+                f"{m.pr_auc:.6f}",
+                f"{m.roc_auc:.6f}",
+                f"{m.precision:.6f}",
+                f"{m.recall:.6f}",
+                f"{m.f1:.6f}",
+                fold_result.n_features,
+            ]
+        )
     print(f"fold {args.fold}: PR-AUC {m.pr_auc:.4f} ROC-AUC {m.roc_auc:.4f} -> {out}")
     return 0
 
