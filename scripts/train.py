@@ -167,10 +167,16 @@ def main() -> int:
         action="store_true",
         help="Also run random stratified CV to quantify how optimistic it is.",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Alternate config YAML (used for feature ablations).",
+    )
     args = parser.parse_args()
 
     setup_logging()
-    config = load_config()
+    config = load_config(args.config)
     set_seed(config.train.seed)
     mlflow = _mlflow_setup("fraud-detection")
 
@@ -210,6 +216,7 @@ def main() -> int:
                 seed=config.train.seed,
                 n_jobs=config.train.n_jobs,
                 max_dense_rows=DENSE_MODEL_MAX_ROWS,
+                exclude_feature_suffixes=config.features.exclude_feature_suffixes,
             )
             cv_results[model_name] = result
             rows.append(cv_result_row(result))
@@ -225,6 +232,7 @@ def main() -> int:
                 "lightgbm",
                 seed=config.train.seed,
                 n_jobs=config.train.n_jobs,
+                exclude_feature_suffixes=config.features.exclude_feature_suffixes,
             )
             random_row = cv_result_row(random_result)
             random_row["model"] = "lightgbm"
@@ -275,6 +283,7 @@ def main() -> int:
                 seed=config.train.seed,
                 n_jobs=config.train.n_jobs,
                 params=best_params,
+                exclude_feature_suffixes=config.features.exclude_feature_suffixes,
             )
             tuned_row = cv_result_row(tuned)
             tuned_row["model"] = f"{best_name}_tuned"
@@ -351,6 +360,7 @@ def main() -> int:
             n_jobs=config.train.n_jobs,
             params=best_params or None,
             max_dense_rows=DENSE_MODEL_MAX_ROWS,
+            exclude_feature_suffixes=config.features.exclude_feature_suffixes,
         )
         final_train_seconds = time.perf_counter() - started
         mlflow.log_metric("final_train_seconds", final_train_seconds)

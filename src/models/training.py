@@ -122,6 +122,22 @@ def _subsample_training_rows(
     return subset, True
 
 
+def _downcast_floats(df: pd.DataFrame) -> pd.DataFrame:
+    """Narrow float64 feature columns to float32, in place, one column at a time.
+
+    Gradient-boosted trees bin their inputs before choosing a split, so float32
+    already carries more precision than the histogram can use — the extra eight
+    bytes per value buy nothing. Halving the matrix is what lets the later,
+    larger folds fit: fold 4 otherwise asks for a single 1.29 GiB contiguous
+    block. Converting column-by-column keeps the peak to one column rather than
+    duplicating the whole frame.
+    """
+    for column in df.columns:
+        if df[column].dtype == "float64":
+            df[column] = df[column].astype("float32")
+    return df
+
+
 def _fit_one(
     model_name: ModelName,
     train_df: pd.DataFrame,
@@ -130,9 +146,10 @@ def _fit_one(
     n_jobs: int,
     params: dict[str, Any] | None,
     max_dense_rows: int | None,
+    exclude_feature_suffixes: tuple[str, ...] = (),
 ) -> tuple[np.ndarray, int, int | None, bool, Any, FeaturePipeline, LinearPreprocessor | None]:
     """Fit one model on one fold and predict on its validation rows."""
-    pipeline = FeaturePipeline()
+    pipeline = FeaturePipeline(exclude_feature_suffixes=exclude_feature_suffixes)
     pipeline.fit(train_df)
 
     needs_dense = model_name in REQUIRES_DENSE_IMPUTED
@@ -161,6 +178,9 @@ def _fit_one(
         n_features = X_train_matrix.shape[1]
         del X_train_matrix, X_validation_matrix
     else:
+        X_train = _downcast_floats(X_train)
+        X_validation = _downcast_floats(X_validation)
+        gc.collect()
         # Inner temporal split for early stopping — never the outer validation fold.
         head, tail = _temporal_tail_split(fit_df, EARLY_STOPPING_FRACTION)
         model = build_model(
@@ -195,6 +215,7 @@ def train_cv(
     n_jobs: int = -1,
     params: dict[str, Any] | None = None,
     max_dense_rows: int | None = None,
+    exclude_feature_suffixes: tuple[str, ...] = (),
 ) -> CVResult:
     """Cross-validate one model over pre-computed folds.
 
@@ -208,6 +229,8 @@ def train_cv(
         n_jobs: Parallelism for the estimator.
         params: Hyperparameter overrides.
         max_dense_rows: Row cap for models requiring a dense imputed matrix.
+        exclude_feature_suffixes: Feature suffixes to drop, for ablations. The
+            encoders are still fitted per fold, so an ablation stays leakage-safe.
 
     Returns:
         A :class:`CVResult` with per-fold metrics and out-of-fold predictions.
@@ -236,6 +259,7 @@ def train_cv(
             n_jobs=n_jobs,
             params=params,
             max_dense_rows=max_dense_rows,
+            exclude_feature_suffixes=exclude_feature_suffixes,
         )
         elapsed = time.perf_counter() - started
 
@@ -279,13 +303,14 @@ def train_final(
     n_jobs: int = -1,
     params: dict[str, Any] | None = None,
     max_dense_rows: int | None = None,
+    exclude_feature_suffixes: tuple[str, ...] = (),
 ) -> tuple[Any, FeaturePipeline, LinearPreprocessor | None, int | None]:
     """Fit the final model on the full modelling period.
 
     Early stopping still uses an inner temporal tail of the training data, so
     the holdout remains completely untouched until the single final evaluation.
     """
-    pipeline = FeaturePipeline()
+    pipeline = FeaturePipeline(exclude_feature_suffixes=exclude_feature_suffixes)
     pipeline.fit(train_df)
 
     needs_dense = model_name in REQUIRES_DENSE_IMPUTED
