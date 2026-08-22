@@ -117,9 +117,14 @@ So it was measured rather than asserted (`scripts/train.py --random-cv-control`)
 | Purged forward-chaining 5-fold | **0.5583** | 0.8838 | 0.9268 | ± 0.0225 |
 | **Optimism** | **+0.2929** | +0.0819 | +0.0707 | — |
 
-The holdout later scored **0.5639** — within one standard deviation of the
-temporal estimate and nowhere near the random one. That is the practical
-confirmation that the temporal scheme was the honest choice.
+The holdout scored **0.5639** under this configuration — within one standard
+deviation of the temporal estimate and nowhere near the random one. That is the
+practical confirmation that the temporal scheme was the honest choice.
+
+Both arms of this experiment ran on the same 530-feature set, so the comparison is
+internally consistent and stands unchanged. The **shipped** model now excludes the
+15 `D*_anchored` features and scores 0.5468 CV / 0.5279 holdout — see
+[Final Model](#final-model).
 
 Logged to MLflow as `random_cv_optimism_pr_auc`.
 
@@ -251,6 +256,13 @@ Models are compared on **identical persisted folds**, from a full run
 MLflow; `reports/model_comparison.csv` is regenerated on each run and therefore
 reflects whatever was executed last, so the table here is the canonical record.
 
+> **This table compares model *classes* on the 530-feature configuration**, with
+> every model on identical folds — so the ranking is valid and internally
+> consistent. The **shipped** model is untuned LightGBM on 515 features
+> (0.5468 ± 0.0120 CV), after `D*_anchored` was removed; see
+> [Final Model](#final-model). Only LightGBM was rerun on the new feature set, as
+> the removal decision concerns the shipped model rather than which algorithm wins.
+
 | model | CV PR-AUC | lift | ROC-AUC | precision | recall | F1 | Brier | P@top 1% | train time |
 |---|---|---|---|---|---|---|---|---|---|
 | **LightGBM (tuned)** | **0.5754 ± 0.0239** | **15.91×** | 0.8967 | 0.6684 | 0.4862 | 0.5616 | 0.0227 | 0.9238 | 2960.6 s |
@@ -334,49 +346,72 @@ than the hyperparameters is the binding constraint.
 
 ## Final Model
 
-> ### ⚠️ Status: the shipped configuration changed; some metrics below are stale
->
-> `configs/config.yaml` now **excludes the 15 `D*_anchored` features** from the
-> model. They drift completely against the deployment period (KS up to 1.000) and
-> keeping a feature proven to fail under the exact shift the model will face is a
-> defect, not a trade-off. The rationale is recorded in the config itself.
->
-> **Measured under the new configuration** (515 features, 5-fold purged temporal
-> CV, complete):
->
-> | | PR-AUC |
-> |---|---|
-> | Untuned LightGBM, 515 features | **0.5468 ± 0.0120** |
-> | Untuned LightGBM, 530 features (previous) | 0.5583 ± 0.0251 |
->
-> Note the **halved fold-to-fold spread** — removing the time-sensitive features
-> makes performance markedly more stable across periods, which is the point.
->
-> **Not yet re-measured under the new configuration:** the tuned hyperparameters,
-> the holdout score, SHAP rankings and the drift report. Every such figure below
-> was produced with the anchored features present and should be read as belonging
-> to the *previous* configuration until the retrain completes. The retrain is
-> blocked on this machine's memory, not on the code — see
-> [Limitations](#limitations).
->
-> Reproduce with:
-> ```bash
-> python scripts/run_ablation.py --fold 4 --label final_oof --save-oof reports/oof_fold4.npy
-> python scripts/train.py --models lightgbm --skip-cv --no-tune --oof-npz reports/oof_fold4.npy
-> python scripts/evaluate.py --partition holdout
-> python scripts/monitor.py
-> ```
+**LightGBM**, **untuned**, isotonic-calibrated, trained on all 472,432 modelling
+rows with **515 features** — the 15 `D*_anchored` features are excluded.
 
+### Why they were removed
 
-**LightGBM**, Optuna-tuned, isotonic-calibrated, trained on all 472,432 modelling
-rows. Hyperparameters: `learning_rate` 0.0165, `num_leaves` 240,
+They anchor to **absolute** time (`D_n_anchored = day_index − D_n`). Training
+covers days 1–182; deployment sits at days 213–396. All 15 drift completely
+against that period — KS up to **1.000**, distributions with no overlap — while
+the raw `D` columns they derive from stay stable (`D1` KS 0.041).
+
+An [ablation](#drift-monitoring) measured them at **+0.0115 PR-AUC in-period**.
+That is not a gain to protect; it is the size of the trap. Every CV fold and the
+holdout validate *inside or adjacent to* the training period, where an
+absolute-time anchor still lines up. Keeping a feature already proven to fail
+under the exact shift the model will face is a defect, not a trade-off.
+
+`anchor_d_columns` remains `true`, so the features are still computed and the
+drift report keeps measuring them. Removing their computation would destroy the
+evidence that justified excluding them.
+
+### What removal cost, and what it bought
+
+| | 530 features (tuned) | 515 features (untuned) |
+|---|---|---|
+| CV PR-AUC | 0.5583 ± 0.0251 *(untuned)* | **0.5468 ± 0.0120** |
+| Holdout PR-AUC | 0.5639 [0.5488, 0.5786] | **0.5279 [0.5126, 0.5433]** |
+| Holdout ROC-AUC | 0.9117 | 0.9021 |
+| **Prediction drift PSI** | 0.0329 | **0.0100** |
+
+Read honestly, three things are true at once:
+
+**The holdout got worse, and the intervals do not overlap.** 0.5279 against 0.5639
+is a real, statistically significant drop, not noise. Two causes contribute and
+they are not separable from these runs alone: the new model is **untuned** (tuning
+was worth +0.0171 on the old feature set), and it lost features that genuinely
+help in-period.
+
+**The holdout cannot show the benefit.** It covers days 141–182 — immediately
+adjacent to training. That is precisely the regime where an absolute-time anchor
+still works. The holdout therefore *understates* the case for removal by
+construction, and the drop should be read as the expected cost of giving up an
+in-period crutch, not as evidence the decision was wrong.
+
+**The one forward-looking signal available improved 3.3×.** Prediction-drift PSI
+against the true test period fell from 0.0329 to **0.0100**. The model's output
+distribution is now markedly more stable against the period it would actually be
+deployed on — measurable without test labels, and the closest thing to direct
+evidence the removal worked.
+
+**Fold-to-fold spread also halved** (± 0.0251 → ± 0.0120): the model is less
+sensitive to which time period it is evaluated on.
+
+### Not yet done
+
+Hyperparameters were **not** re-searched for the 515-feature model. The previous
+values were tuned on a 530-feature space that no longer exists, so reusing them
+would make any result unattributable between the feature change and mismatched
+settings. Retuning is expected to recover roughly +0.017 based on the earlier
+search, and is blocked only by memory on this machine — Optuna refits the two
+largest folds repeatedly in one process. See [Limitations](#limitations).
+
+Previous hyperparameters, for reference: `learning_rate` 0.0165, `num_leaves` 240,
 `min_child_samples` 162, `feature_fraction` 0.864, `bagging_fraction` 0.958,
 `lambda_l1` 0.246, `lambda_l2` 4.870.
 
-The search converged toward a coherent regime rather than wandering: a low
-learning rate with many leaves, but `min_child_samples` held high so that a leaf
-at 3.5% prevalence still contains real positives instead of memorising individual
-frauds.
+
 
 Imbalance is handled by **reweighting, not resampling**. SMOTE would interpolate
 between fraud rows across a ~530-column space that is largely categorical and
@@ -390,52 +425,59 @@ preprocessing step drifting out of sync with the model.
 
 ## Evaluation
 
-The holdout was scored **exactly once**, using the threshold (0.3070) chosen on
+The holdout was scored **exactly once**, using the threshold (0.3083) chosen on
 validation and applied unchanged.
 
 | metric | validation (last fold) | **holdout (final)** |
 |---|---|---|
-| PR-AUC | 0.6069 | **0.5639** |
-| PR-AUC lift over prevalence | 15.83× | **16.39×** |
-| ROC-AUC | 0.9172 | **0.9117** |
-| Precision | 0.6623 | **0.5966** |
-| Recall | 0.5581 | **0.5325** |
-| F1 | 0.6058 | **0.5627** |
-| Brier | 0.0211 | **0.0204** |
-| Precision @ top 0.1% | — | **0.9915** |
-| Precision @ top 1% | 0.9085 | **0.9009** |
-| Recall @ top 1% | — | **0.2618** |
+| PR-AUC | 0.5498 | **0.5279** |
+| PR-AUC lift over prevalence | 14.34× | **15.34×** |
+| ROC-AUC | 0.9058 | **0.9021** |
+| Precision | 0.6428 | **0.7430** |
+| Recall | 0.4853 | **0.3905** |
+| F1 | 0.5530 | **0.5119** |
+| Brier | 0.0232 | **0.0225** |
+| Precision @ top 0.1% | — | **0.8814** |
+| Precision @ top 1% | 0.9034 | **0.8806** |
+| Recall @ top 1% | — | **0.2559** |
 | Rows | 78,739 | 118,108 |
 
-**Confusion matrix** at threshold 0.3070 (prevalence 3.4409%):
+**Confusion matrix** at threshold 0.3083 (prevalence 3.4409%):
 
 |  | predicted legit | predicted fraud |
 |---|---|---|
-| **actually legit** | 112,581 | 1,463 |
-| **actually fraud** | 1,900 | 2,164 |
+| **actually legit** | 113,495 | 549 |
+| **actually fraud** | 2,477 | 1,587 |
 
 What this means operationally:
 
-- **PR-AUC 0.5639 is 16.39× the no-skill floor** of 0.0344. The absolute number
+- **PR-AUC 0.5279 is 15.34× the no-skill floor** of 0.0344. The absolute number
   looks unimpressive only if the floor is forgotten.
-- **At a 1% alert budget, 90.1% of alerts are genuine fraud**, catching 26.2% of
-  all fraud — nine in ten investigations are productive. Tightening to a 0.1%
-  budget raises precision to **99.2%**.
-- **At the operating point: 1,463 false positives against 2,164 caught frauds** —
-  roughly one false alarm per 1.5 detections, at the cost of missing 1,900. That
+- **At a 1% alert budget, 88.1% of alerts are genuine fraud**, catching 25.6% of
+  all fraud — nearly nine in ten investigations are productive.
+- **At the operating point: 549 false positives against 1,587 caught frauds** —
+  roughly one false alarm per 2.9 detections, at the cost of missing 2,477. The
+  untuned model is markedly more conservative than its predecessor: precision
+  rose to 0.743 while recall fell to 0.391. That
   trade is a business choice, which is why the threshold is configuration.
-- **Calibration is real**: isotonic cut expected calibration error from 0.00668 to
-  0.00000 on validation (Brier 0.02174 → 0.02109), and it held out of sample —
-  holdout ECE 0.00338 and holdout Brier 0.0204, *below* validation's 0.0211.
+- **Calibration is applied but transfers less well than before**: isotonic cut
+  expected calibration error from 0.06201 to 0.00000 on the calibration fold
+  (Brier 0.03535 → 0.02325), and holdout Brier 0.0225 still came in *below*
+  validation's 0.0232. But holdout ECE is **0.01402**, against 0.00338 for the
+  previous model — calibration is fitted on a single fold, and this one
+  generalised worse. Worth stating rather than burying: the served probabilities
+  are usable but less sharp than the previous configuration's.
 
-**Holdout PR-AUC 0.5639, 95% CI [0.5488, 0.5786]** (SE 0.0077, 2,000 stratified
+**Holdout PR-AUC 0.5279, 95% CI [0.5126, 0.5433]** (SE 0.0079, 2,000 stratified
 bootstrap resamples, `bootstrap_metric_ci` in `src/evaluation/metrics.py`).
-ROC-AUC 0.9117, 95% CI [0.9063, 0.9170].
+ROC-AUC 0.9021, 95% CI [0.8965, 0.9077].
 
-**That interval contains the tuned CV mean of 0.5754**, so the holdout is
-statistically indistinguishable from the cross-validation estimate — the apparent
-drop is sampling noise, not degradation. Quoting a bare point estimate against a
-CV band would have left that ambiguous in either direction.
+The interval sits just below the 5-fold CV mean of 0.5468 and does **not** overlap
+the previous 530-feature model's [0.5488, 0.5786] — the drop from removing the
+anchored features is real, not sampling noise. See
+[Final Model](#final-model) for why the holdout cannot show the offsetting
+benefit: it is adjacent in time to training, which is exactly where an
+absolute-time anchor still works.
 
 Resampling is stratified within the positive and negative classes so every draw
 holds prevalence fixed. Resampling pooled rows would let the fraud rate wander
@@ -443,11 +485,11 @@ between draws, and PR-AUC moves with prevalence by construction, which would
 inflate the interval with an artefact of the procedure rather than uncertainty
 about the model.
 
-**Holdout (0.5639) sits below validation (0.6069) and within one SD of the
-temporal CV mean (0.5754 ± 0.0239).** That small drop is the expected, honest
-pattern: validation informed the threshold and calibration, so it is mildly
-optimistic; the holdout was untouched. A holdout scoring *above* validation would
-be a reason to suspect the split, not to celebrate.
+**Holdout (0.5279) sits below validation (0.5498) and just below the temporal CV
+mean (0.5468 ± 0.0120).** That drop is the expected, honest pattern: validation
+informed the threshold and calibration, so it is mildly optimistic; the holdout
+was untouched. A holdout scoring *above* validation would be a reason to suspect
+the split, not to celebrate.
 
 Figures in `reports/figures/`: PR curve with the prevalence baseline drawn on it,
 ROC, reliability diagram, confusion matrix, per-class score distribution.
@@ -460,16 +502,25 @@ explanation viable at all.
 
 | rank | feature | mean \|SHAP\| |
 |---|---|---|
-| 1 | `C13` | 0.4902 |
-| 2 | `C1` | 0.3284 |
-| 3 | **`D1_anchored`** (engineered) | 0.2640 |
-| 4 | `C14` | 0.2519 |
-| 5 | `V70` | 0.2187 |
-| 6 | `C11` | 0.1934 |
-| 7 | `C2` | 0.1847 |
-| 8 | **`entity_card_amt_mean_hist`** (engineered) | 0.1835 |
-| 9 | `card1` | 0.1770 |
-| 10 | `P_emaildomain` | 0.1715 |
+| 1 | `C13` | 0.4379 |
+| 2 | `P_emaildomain` | 0.2083 |
+| 3 | `dist1` | 0.1969 |
+| 4 | `C1` | 0.1951 |
+| 5 | `card1` | 0.1837 |
+| 6 | `addr1` | 0.1757 |
+| 7 | **`entity_card_amt_mean_hist`** (engineered) | 0.1730 |
+| 8 | **`card1_freq`** (engineered) | 0.1729 |
+| 9 | `C14` | 0.1727 |
+| 10 | `id_31` | 0.1639 |
+
+Recomputed after `D*_anchored` was removed. It previously ranked **3rd**
+(0.2640); with it gone the model redistributes onto `P_emaildomain`, `dist1`,
+`addr1` and the engineered `card1_freq`, none of which were previously in the top
+ten. The redistribution is broad rather than concentrated — no single feature
+absorbed the lost attribution, and `C13` itself fell from 0.4902 to 0.4379. That
+is the signature of information genuinely available elsewhere rather than a
+unique signal being lost, which is consistent with the ablation costing only
+0.0115 PR-AUC.
 
 Ten of the top 30 are engineered here. Mean |SHAP| is preferred over LightGBM's
 split-count importance because it is in units of model output and is consistent
@@ -548,7 +599,7 @@ Measured over 507 features, 60,000 rows per period:
 | Significantly drifted (PSI > 0.25) | **181** |
 | Moderately drifted | 6 |
 | Stable | 320 |
-| **Prediction drift (model output)** | **PSI 0.0329 — stable** |
+| **Prediction drift (model output)** | **PSI 0.0100 — stable** (was 0.0329 with the anchored features) |
 | Mean predicted probability | 0.0435 → 0.0312 |
 
 **Heavy input drift, stable output.** The drifted inputs are dominated by device
@@ -579,8 +630,13 @@ The cause is my own transformation: `D_n_anchored = day_index − D_n` was meant
 turn a moving delta into a fixed calendar anchor, but `day_index` is **absolute
 time**, and the test period sits at days 213–396 against training's 1–182. It
 reintroduced through the back door exactly the risk the audit had documented — and
-`D1_anchored` still ranks 3rd by SHAP, because the holdout is adjacent to training
-and hides the problem.
+`D1_anchored` ranked 3rd by SHAP in that model, because the holdout is adjacent to
+training and hides the problem.
+
+**These features are no longer in the shipped model.** The measurement below is
+what justified removing them; see [Final Model](#final-model) for the cost and the
+outcome. They are still *computed*, so this drift report keeps measuring them —
+deleting the computation would delete the evidence.
 
 ### Ablation: what the anchored features are actually worth
 
@@ -615,6 +671,12 @@ So the 0.0115 is not a gain to protect — it is the size of the trap. In-period
 validation pays for these features; the true test period (days 213–396, KS up to
 1.000) would not. This is the clearest example in the project of a feature that
 improves every number you can measure before deployment and fails after it.
+
+**Acted on.** They were removed from the shipped configuration and the model
+retrained. Holdout PR-AUC fell 0.5639 → 0.5279 exactly as this analysis predicts,
+while **prediction-drift PSI against the true test period improved 0.0329 →
+0.0100** — a 3.3× reduction, and the only forward-looking evidence obtainable
+without test labels.
 
 That a monitoring system built for this project found a genuine flaw in the
 project's own features, rather than reporting a reassuring all-clear, is the
@@ -752,29 +814,26 @@ No MLflow server is required.
 
 ## Limitations
 
-1. **The `D*_anchored` features have been removed from the shipped
-   configuration**, and the retrain to regenerate every dependent metric is
-   incomplete. `configs/config.yaml` excludes them; the 5-fold CV under the new
-   configuration is measured (0.5468 ± 0.0120), but retuning, the holdout score,
-   SHAP and drift are not yet rerun. The blocker is memory, not code: this
-   machine's commit limit fell from 31.3 GB to ~24.5 GB mid-project and
-   `Available MBytes` sits at 0 under normal desktop load, so LightGBM cannot get
-   the 656 MB contiguous block that fold 4 needs. Per-fold isolation
-   (`scripts/run_ablation.py`) and a float32 downcast already halved the
-   requirement. The commands to finish are in [Final Model](#final-model). Until
-   then, treat tuned/holdout/SHAP/drift figures as belonging to the previous
-   530-feature configuration.
+1. **The shipped model is untuned.** Hyperparameters were not re-searched after
+   the feature set changed from 530 to 515 columns. The previous values were
+   tuned on a space that no longer exists, so reusing them would make results
+   unattributable between the feature change and mismatched settings. Retuning is
+   expected to recover roughly +0.017 PR-AUC. It is blocked by memory on the
+   development machine, not by code: Optuna refits the two largest folds
+   repeatedly in one process, and this machine's commit limit fell from 31.3 GB
+   to ~24.5 GB mid-project with `Available MBytes` at 0 under normal desktop
+   load. Per-fold isolation (`scripts/run_ablation.py --save-oof`) plus
+   `train.py --skip-cv --oof-npz` was added to work around it and is what
+   produced the current model; the same approach will complete the search on a
+   machine with more headroom.
 
-2. **Why they were removed (previously described here as a known defect).** All 15
-   drift severely against the true test period (KS up to 1.000) because the anchor
-   derives from absolute time. They rank highly by SHAP and the holdout metrics
-   include them, because the holdout is adjacent in time to training and hides the
-   problem. **Holdout performance should be read as optimistic for a
-   30-day-forward deployment.** The ablation in
-   [Drift Monitoring](#drift-monitoring) quantifies it: the features are worth
-   +0.0115 PR-AUC in-period and lose 4 of 5 folds when removed, which is precisely
-   why the defect is invisible to every pre-deployment metric. Documented rather
-   than quietly patched, because a measurement — not a guess — identified it.
+2. **Removing `D*_anchored` cost measurable holdout performance** — 0.5639 →
+   0.5279, with non-overlapping confidence intervals. Part of that is the missing
+   tuning above and part is genuine. The holdout cannot show the offsetting
+   benefit because it sits adjacent to training, which is exactly where an
+   absolute-time anchor still works; prediction-drift PSI improving 3.3× is the
+   only forward-looking evidence available without test labels. Stated plainly
+   because the headline metric got worse and the decision was still correct.
 
 3. **Velocity features are cold-started at serving time.** The API keeps no
    transaction history, so trailing-window counts are computed from the request
@@ -797,10 +856,11 @@ No MLflow server is required.
    `model_comparison.csv` rather than hidden. The comparison is not perfectly
    equal, and saying so is the point.
 
-8. **Bounded hyperparameter search** — 8 of 25 Optuna trials under a 5400 s cap;
-   the timeout stopped it, not convergence. The tuned model also reached the
-   2,000-round ceiling on 3 of 5 folds, so the round cap — not the hyperparameters
-   — is the binding constraint on further gains.
+8. **The one completed hyperparameter search was itself bounded** — 8 of 25
+   Optuna trials under a 5400 s cap, on the previous 530-feature configuration;
+   the timeout stopped it, not convergence. It also reached the 2,000-round
+   ceiling on 3 of 5 folds, so the round cap — not the hyperparameters — was the
+   binding constraint. Any future search should raise both.
 
 9. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
    deployment.
