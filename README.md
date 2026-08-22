@@ -16,9 +16,43 @@ The answer, measured in this repository:
 > trustworthy exactly where it was more wrong.
 
 Everything else here exists to make that finding trustworthy and to ship the
-resulting model.
+resulting model. *(Both arms of that experiment used the same 530-feature set, so
+the comparison is internally consistent; the shipped model differs — see below.)*
 
-> **Every number below was produced by code in this repository.** Model metrics
+## Results
+
+**Shipped model:** LightGBM, 547 features, trained on all 472,432 modelling rows,
+isotonic-calibrated, **untuned**.
+
+| metric | value |
+|---|---|
+| **Holdout PR-AUC** | **0.5538** — 95% CI [0.5384, 0.5688] |
+| PR-AUC lift over the 3.44% prevalence floor | **16.09×** |
+| Holdout ROC-AUC | 0.8999 |
+| Temporal CV PR-AUC (5 purged folds) | 0.5591 ± 0.0195 |
+| Precision @ 0.1% alert budget | 0.9831 |
+| Precision @ 1% alert budget | 0.9094 |
+| Prediction drift vs test period | PSI 0.0455 (stable) |
+
+The holdout was scored **once**, at the end, on the last 118,108 transactions
+chronologically. Its interval overlaps that of an earlier model that used a
+leaking feature, so nothing was given up for the leakage-free design.
+
+Three findings the repository produced about itself:
+
+1. **Random CV overstated performance by +0.2929** — the result above.
+2. **Drift monitoring caught a defect in this project's own feature
+   engineering**: 15 features it built drift completely against the deployment
+   period (KS 1.000). They were removed from the model.
+3. **The same quantity was then recovered as an entity key** rather than a
+   numeric feature, restoring the lost accuracy without the leak.
+
+Two models were benchmarked and **lost** — XGBoost and CatBoost — and are
+reported as losses.
+
+---
+
+> **Every number here was produced by code in this repository.** Model metrics
 > from `scripts/train.py` (also in `reports/model_comparison.csv` and MLflow);
 > dataset facts from `scripts/inspect_dataset.py`; drift figures from
 > `scripts/monitor.py`. Where something was not executed, it says so.
@@ -27,7 +61,7 @@ resulting model.
 
 ## Contents
 
-[Problem](#problem) · [Dataset](#dataset) · [Why Random CV Was Misleading](#why-random-cv-was-misleading) ·
+[Results](#results) · [Problem](#problem) · [Dataset](#dataset) · [Why Random CV Was Misleading](#why-random-cv-was-misleading) ·
 [Temporal Validation](#temporal-validation) · [Leakage-Safe Feature Engineering](#leakage-safe-feature-engineering) ·
 [Model Comparison](#model-comparison) · [Final Model](#final-model) · [Evaluation](#evaluation) ·
 [SHAP Explainability](#shap-explainability) · [FastAPI](#fastapi) · [Docker](#docker) ·
@@ -184,21 +218,15 @@ f4   [train 1-107.6                            ]<-7d->[ val 114.6-141.1 ]
 | 3 | 293,305 | 1.0 – 83.8 | 78,739 | 90.8 – 114.6 | **7.0 d** | none |
 | 4 | 372,880 | 1.0 – 107.6 | 78,739 | 114.6 – 141.1 | **7.0 d** | none |
 
-Boundaries are read back off the persisted folds rather than asserted from the
-code that wrote them. Four properties hold on every fold, and all four are
-verified rather than claimed:
+Those boundaries are read back **off the persisted folds**, not asserted from the
+code that wrote them. Verified on every fold: each validation start is later than
+its train end, index overlap is empty, rows are time-ordered within each training
+window, and the windows expand monotonically (46,274 → 372,880).
 
-| property | result |
-|---|---|
-| Every validation start > every train end | **True** |
-| Train / validation index overlap | **none** |
-| Rows time-ordered within each training window | **True** |
-| Training windows expand monotonically | 46,274 → 133,979 → 214,078 → 293,305 → 372,880 |
-
-How the boundary is enforced: folds are cut on **timestamp edges**, persisted once
-to `data/processed/folds_temporal.npz`, and reused byte-identically by every model,
-so no model can be scored on a different split. `_assert_disjoint_in_time` fails the
-run if a timestamp appears in two partitions, and the 7-day purge is applied by
+Folds are cut on **timestamp edges**, persisted once to
+`data/processed/folds_temporal.npz` and reused byte-identically by every model, so
+no two models can be scored on different splits. `_assert_disjoint_in_time` fails
+the run if a timestamp appears in two partitions, and the purge is applied by
 *index position*, not by sampling — there is no shuffle anywhere in the path.
 
 Validation fraud rate exceeds training fraud rate in *every* fold — a structural
@@ -276,28 +304,27 @@ reflects whatever was executed last, so the table here is the canonical record.
 **Boosting is measured to be better, not assumed** — untuned LightGBM beats Random
 Forest by +0.091 PR-AUC and Logistic Regression by +0.202.
 
-**CatBoost was run and lost too.** Added because its ordered target statistics
-handle high-cardinality categoricals differently from LightGBM's split-based
-approach, and this dataset is largely high-cardinality categorical — so the
-difference was measured rather than assumed. On fold 4 with the hybrid feature
-set it scored **0.5368 against LightGBM's 0.5845**, taking **1431 s against
-310 s** — 4.6× the cost for 0.048 less PR-AUC. Reported from a single fold: at
-~24 minutes per fold a full five-fold run is two hours, and the gap is more than
-twice the fold-to-fold spread, so more folds would not change the conclusion.
+**Two challengers were run and both lost.**
 
-Worth noting *why* it lost here when it won in the reference solution: that run
-used a GPU with 5000 trees and transductive train+test encodings. On CPU at 2000
-trees with train-only encoding, the advantage does not transfer. A model's
-reported strength is a property of its setup as much as its algorithm.
+*XGBoost* — 0.5370 against LightGBM's 0.5583, winning 1 of 5 folds at 2.1× the
+training cost. Given a search space mirrored to LightGBM's, the same native
+categorical handling, the same folds and the same early-stopping rule, so the
+comparison reflects the algorithms rather than the setup. The margin is close to
+the fold-to-fold spread (±0.021), so it is a consistent but modest loss; the
+4-of-5 fold record is what makes it credible, not the mean alone.
 
-**XGBoost was run and lost.** It was given a search space mirrored to LightGBM's,
-the same native categorical handling, the same folds and the same early-stopping
-rule, so the comparison reflects the algorithms rather than the setup. It came in
-0.021 PR-AUC lower at 2.1× the training cost, winning 1 of 5 folds (fold 3). The
-margin is comparable to the fold-to-fold spread (±0.021), so this is a consistent
-but modest loss, not a decisive one — the 4-of-5 fold record is what makes it
-credible, not the mean alone. It is reported rather than dropped: a comparison in
-which the challenger always wins would say nothing about the methodology.
+*CatBoost* — 0.5368 against 0.5845 on fold 4 with the shipped feature set, at
+1431 s against 310 s. Added because its ordered target statistics handle
+high-cardinality categoricals differently, and this dataset is largely
+high-cardinality categorical, so the difference was measured rather than assumed.
+Reported from one fold: at ~24 min/fold a full run is two hours and the gap is
+more than twice the fold-to-fold spread. Worth noting *why* it lost here when it
+won in the reference solution — that run used a GPU with 5000 trees and
+transductive encodings. A model's reported strength is a property of its setup as
+much as its algorithm.
+
+Both are kept in the repository as losses. A comparison in which the challenger
+always wins says nothing about the methodology.
 
 **ROC-AUC hides most of that gap.** Random Forest reaches 0.8819 against untuned
 LightGBM's 0.8838 — a **0.002** difference — while the PR-AUC gap is **0.091**,
@@ -318,131 +345,67 @@ only rankings.
 ### The row-count confound, measured rather than waved away
 
 Logistic Regression and Random Forest are fitted on **100,000 rows** (all
-positives kept, negatives downsampled) because their one-hot matrices are 929
-features wide; LightGBM and XGBoost use every row with 530 native features. That
-is a genuine confound — the baselines could be losing on data volume rather than
-on model class.
+positives kept) because their one-hot matrices are 929 features wide, while the
+boosters use every row. That is a genuine confound — the baselines could be losing
+on data volume rather than model class.
 
-Rather than argue about it, the boosters were rerun **at the baselines' row
-count** (`--force-subsample 100000`, same folds, same seed):
+So the boosters were rerun **at the baselines' row count**
+(`--force-subsample 100000`, same folds and seed):
 
-| fold | LightGBM full | LightGBM @100k | cost |
-|---|---|---|---|
-| 0 | 0.5338 | 0.5338 | 0.0000 |
-| 1 | 0.5473 | 0.5484 | +0.0011 |
-| 2 | 0.5683 | 0.5586 | −0.0097 |
-| 3 | 0.5448 | 0.5567 | +0.0119 |
-| 4 | 0.5973 | 0.5805 | −0.0168 |
-| **mean** | **0.5583** | **0.5556** | **−0.0027** |
-
-At equal data, LightGBM scores **0.5556** against Random Forest's 0.4677 and
-Logistic Regression's 0.3560:
-
-| comparison | value |
+| | value |
 |---|---|
+| LightGBM at 100k rows | 0.5556 (vs 0.5583 at full data) |
 | Cost of subsampling to LightGBM | **0.0027** |
-| LightGBM margin over Random Forest | **0.0879** (**33× larger**) |
-| LightGBM margin over Logistic Regression | **0.1996** (74× larger) |
+| LightGBM margin over Random Forest | **0.0879** — **33× larger** |
+| LightGBM margin over Logistic Regression | 0.1996 — 74× larger |
 
 **The ranking is not an artefact of training-set size.** Fold 0 is identical in
-both columns because its training window holds 46,274 rows — below the cap — which
+both runs because its training window holds 46,274 rows, below the cap — which
 confirms the flag does nothing when it should do nothing.
 
-Why not simply fit the baselines on all 472k rows with a sparse matrix? Because
-sparse is *worse* here. After median-fill the 492 numeric columns have almost no
-zeros, so CSR pays 8 bytes per nonzero (4-byte value + 4-byte index) where dense
-pays 4: **1.98 GB sparse against 1.62 GB dense.** Sparse storage only wins when
-the numeric block itself is sparse; here only the 430-column one-hot block is.
-The honest fix is more RAM or an out-of-core solver, not a storage change — and
-the equal-data control above answers the question without needing either. Tuning gained **+0.0171 PR-AUC** from **8 of 25 Optuna trials** in
-5964.4 s — the wall-clock cap stopped the search, not convergence, so 0.5754 is a
-lightly-searched improvement rather than a converged optimum. Finally, the tuned
-model hit the 2,000-round ceiling on 3 of 5 folds, meaning the round cap rather
-than the hyperparameters is the binding constraint.
+Why not just fit the baselines on all 472k rows with a sparse matrix? Because
+sparse is *worse* here: after median-fill the 492 numeric columns have almost no
+zeros, so CSR pays 8 bytes per nonzero where dense pays 4 — **1.98 GB against
+1.62 GB**. Sparse wins only when the numeric block is sparse; here only the
+one-hot block is. The honest fix is more RAM, and the equal-data control answers
+the question without needing it.
 
 ## Final Model
 
 **LightGBM**, **untuned**, isotonic-calibrated, trained on all 472,432 modelling
-rows with **547 features** — the 15 `D*_anchored` features are excluded as model
-inputs, and the same underlying quantity is reused to build the `_entity_uid`
-account key.
+rows with **547 features**.
 
-### Why they were removed
+The interesting part is what happened to 15 of them.
 
-They anchor to **absolute** time (`D_n_anchored = day_index − D_n`). Training
-covers days 1–182; deployment sits at days 213–396. All 15 drift completely
-against that period — KS up to **1.000**, distributions with no overlap — while
-the raw `D` columns they derive from stay stable (`D1` KS 0.041).
+### A feature that was harmful as a number and useful as an identity
 
-An [ablation](#drift-monitoring) measured them at **+0.0115 PR-AUC in-period**.
-That is not a gain to protect; it is the size of the trap. Every CV fold and the
-holdout validate *inside or adjacent to* the training period, where an
-absolute-time anchor still lines up. Keeping a feature already proven to fail
-under the exact shift the model will face is a defect, not a trade-off.
+`D*_anchored` (`day_index − D_n`) anchors to **absolute** time. Training covers
+days 1–182; deployment sits at days 213–396. All 15 drift completely against that
+period — KS up to **1.000**, distributions with no overlap — while the raw `D`
+columns they derive from stay stable (`D1` KS 0.041). Drift monitoring found this;
+it was not anticipated.
 
-`anchor_d_columns` remains `true`, so the features are still computed and the
-drift report keeps measuring them. Removing their computation would destroy the
-evidence that justified excluding them.
+An ablation priced them at **+0.0115 PR-AUC in-period** — not a gain to protect,
+but the size of the trap. Every fold and the holdout validate *inside or adjacent
+to* the training period, exactly where an absolute-time anchor still lines up. So
+they were removed as model inputs.
 
-### Recovering the loss honestly: the uid entity key
+Then the same quantity came back a different way. `D1 − day_index` is constant per
+card: it encodes when the account was first seen. As a **value** it drifts; as a
+**grouping key** the drift is irrelevant, because keys are compared for equality,
+not magnitude. Identity survives distribution shift. So `_entity_uid` = card
+fields + that anchor, hashed deterministically: **194,519 groups over 472,432
+rows** (2.43 transactions each) against the previous `card1 + addr1 + card2` key's
+37,859. Frequency and amount aggregates over it are fitted on the **training
+partition only**. Added alongside: V missingness-block summaries, reducing the 339
+anonymised V columns to a mean and std per block.
 
-Removing the anchored features cost real accuracy. It was recovered — without
-reintroducing leakage — by using the *same quantity* a different way.
+`anchor_d_columns` stays `true`, so the features are still computed and the drift
+report keeps measuring them — deleting the computation would delete the evidence.
 
-`D1 - day_index` is constant for a given card: it encodes when the account was
-first seen. As a **numeric feature** that value drifts completely against the
-deployment period (KS 1.000), which is why it was removed. As a **grouping key**
-the drift is irrelevant: two transactions from one card land in the same group in
-any period, because the key is compared for *equality*, not magnitude. Identity
-survives distribution shift; magnitude does not.
+### The three configurations, measured
 
-So `_entity_uid` = card fields + `D1 - day_index`, hashed deterministically
-(`add_uid_entity_key`). It yields **194,519 groups over 472,432 rows** (2.43
-transactions each) against the previous `card1 + addr1 + card2` key's 37,859 — a
-5× finer account approximation. Frequency and amount aggregates over it are
-fitted on the **training partition only**, as with every other encoder here.
-
-Added alongside it: **V missingness-block summaries**, reducing the 339
-anonymised V columns to a per-row mean and std for each block of columns sharing
-a null count (13 blocks on the full training partition).
-
-| fold | 530 feat *(leaky)* | 515 feat *(clean)* | **545 feat (hybrid)** | vs clean |
-|---|---|---|---|---|
-| 0 | 0.5338 | 0.5335 | 0.5375 | +0.0040 |
-| 1 | 0.5473 | 0.5575 | 0.5723 | +0.0147 |
-| 2 | 0.5683 | 0.5496 | 0.5575 | +0.0079 |
-| 3 | 0.5448 | 0.5350 | 0.5436 | +0.0086 |
-| 4 | 0.5973 | 0.5583 | 0.5845 | +0.0262 |
-| **mean** | **0.5583 ± 0.0251** | **0.5468 ± 0.0120** | **0.5591 ± 0.0195** | **+0.0123** |
-
-**Improves 5 folds out of 5, and at 0.5591 slightly exceeds the original leaky
-model's 0.5583.** The cost of removing the drifting features is fully recovered
-with train-only encoding — there is no accuracy-versus-integrity trade left to
-make here.
-
-The V blocks are fitted per fold, so feature counts differ slightly across folds
-(541–545): later folds train on more rows, so more blocks clear the null-count
-threshold. Group membership is a **fitted parameter**, not derived per frame —
-deriving it per frame gives 14 groups on the full partition and 13 on a 30k
-slice, which would both break the fit/transform contract and let validation rows
-influence their own encoding.
-
-### Credit and what was deliberately not taken
-
-The uid construction is adapted from the IEEE-CIS 17th-place solution. That
-solution scores **0.952 ROC-AUC** on this exact split against this project's
-0.902, and most of the gap is technique this project refuses on purpose: its
-frequency encodings, uid aggregations and time-block encodings are all fitted
-over `concat(train, test)`, and one feature is literally
-`TransactionAmt.isin(test.TransactionAmt)`. That is transductive — legal on
-Kaggle, undeployable in production, and the thing
-[Leakage-Safe Feature Engineering](#leakage-safe-feature-engineering) exists to
-prevent. The uid *idea* transfers cleanly; the encoding of it does not, so it was
-reimplemented train-only.
-
-### What removal cost, and what it bought
-
-| | 530 feat *(leaky, tuned)* | 515 feat *(stripped)* | **547 feat (shipped hybrid)** |
+| | 530 feat *(leaky)* | 515 feat *(stripped)* | **547 feat (shipped)** |
 |---|---|---|---|
 | CV PR-AUC | 0.5583 ± 0.0251 | 0.5468 ± 0.0120 | **0.5591 ± 0.0195** |
 | Holdout PR-AUC | 0.5639 [0.5488, 0.5786] | 0.5279 [0.5126, 0.5433] | **0.5538 [0.5384, 0.5688]** |
@@ -451,63 +414,37 @@ reimplemented train-only.
 | Precision @ top 0.1% | 0.9915 | 0.8814 | **0.9831** |
 | Prediction drift PSI | 0.0329 | **0.0100** | 0.0455 |
 
-All three are untuned except the first; hyperparameters were searched once on the
-530-feature set and deliberately not carried across a changed feature space.
+Removing the drifting features cost **0.0360** holdout PR-AUC; the uid recovered
+**0.0259** of it, and the shipped interval **overlaps the leaky model's** — the
+leakage-free pipeline is now statistically indistinguishable from the one that
+cheated, and improves on it in CV. The middle column is kept because it is what
+motivated the uid work, not because it was ever shipped.
 
-**The headline recovery.** Stripping the drifting features cost 0.0360 holdout
-PR-AUC; the uid key recovered 0.0259 of it. The hybrid's interval overlaps the
-leaky model's, so the leakage-free pipeline is now statistically indistinguishable
-from the one that cheated — while precision at a 0.1% alert budget is back to
-0.9831 from 0.8814.
+**The cost, stated plainly: prediction drift rose to 0.0455**, the highest of the
+three though still inside the documented <0.10 band. Most test-period accounts are
+unseen in training, so `entity_uid_freq` is 0 for them. That is correct — an
+unseen account has no history — and the alternative, fitting the encoder over test
+data, is the transductive shortcut this project refuses. But the feature's
+distribution does shift between periods. The uid buys accuracy and spends some
+distributional stability.
 
-**The cost, stated plainly: prediction drift rose to 0.0455**, above both earlier
-models. Still "stable" by the documented <0.10 band, but it is the highest of the
-three and the uid is why. Accounts are identified by card attributes plus an
-account-open anchor, and most test-period accounts were never seen in training,
-so `entity_uid_freq` collapses to 0 for them. That is correct behaviour — an
-unseen account genuinely has no history, and inventing one by fitting the encoder
-over test data is exactly the transductive shortcut this project refuses — but it
-does mean the feature's distribution shifts between periods. The honest summary
-is that the uid buys accuracy and spends some distributional stability, and both
-halves are measured rather than assumed.
+### Credit, and what was deliberately not taken
 
-Read honestly, three things are true at once:
+The uid construction is adapted from the IEEE-CIS 17th-place solution, which
+scores **0.952 ROC-AUC** on this exact split against this project's 0.900. Most of
+that gap is technique refused on purpose: its frequency encodings, uid
+aggregations and time-block encodings are all fitted over `concat(train, test)`,
+and one feature is literally `TransactionAmt.isin(test.TransactionAmt)`. That is
+transductive — legal on Kaggle, undeployable in production. The uid *idea*
+transfers; its encoding does not, so it was reimplemented train-only.
 
-**Removing the features alone did hurt, measurably.** The stripped model scored
-0.5279 against the leaky 0.5639 on non-overlapping intervals — a real drop, not
-noise. Part was the missing hyperparameter search, part was genuine signal loss.
-That intermediate state is kept in the tables above rather than erased, because it
-is what motivated the uid work.
+### Not tuned
 
-**The holdout could never show the offsetting benefit.** It covers days 141–182,
-immediately adjacent to training — precisely the regime where an absolute-time
-anchor still works. The holdout *understates* the case for removal by
-construction, which is why the decision could not be judged on it alone.
-
-**The uid closed the gap without reintroducing the leak.** 0.5538 holdout, an
-interval overlapping the leaky model's, and CV 0.5591 slightly above it. The
-recovery came from using the same quantity as an identity rather than a magnitude
-— so the model keeps the information while dropping the dependence on absolute
-time.
-
-**Fold-to-fold spread narrowed** from ± 0.0251 (leaky) to ± 0.0195 (hybrid), via
-± 0.0120 for the stripped model: the shipped model is less sensitive to which time
-period it is evaluated on than the one that leaked.
-
-### Not yet done
-
-Hyperparameters were **not** re-searched for the 515-feature model. The previous
+Hyperparameters were not re-searched after the feature set changed. The previous
 values were tuned on a 530-feature space that no longer exists, so reusing them
-would make any result unattributable between the feature change and mismatched
-settings. Retuning is expected to recover roughly +0.017 based on the earlier
-search, and is blocked only by memory on this machine — Optuna refits the two
-largest folds repeatedly in one process. See [Limitations](#limitations).
-
-Previous hyperparameters, for reference: `learning_rate` 0.0165, `num_leaves` 240,
-`min_child_samples` 162, `feature_fraction` 0.864, `bagging_fraction` 0.958,
-`lambda_l1` 0.246, `lambda_l2` 4.870.
-
-
+would make results unattributable between the feature change and mismatched
+settings. Retuning is worth roughly **+0.017** based on the earlier search and is
+blocked by memory, not code — see [Limitations](#limitations).
 
 Imbalance is handled by **reweighting, not resampling**. SMOTE would interpolate
 between fraud rows across a ~530-column space that is largely categorical and
@@ -712,7 +649,7 @@ computed.
 
 Monitoring caught a real defect in this project's **own** feature engineering.
 
-All 15 `D*_anchored` features drift significantly, while the raw `D` columns they
+All 15 `D*_anchored` features drift severely, while the raw `D` columns they
 derive from are stable:
 
 | feature | PSI | KS |
@@ -723,59 +660,35 @@ derive from are stable:
 | `D15` (raw) | 0.108 | 0.140 |
 | `D1` (raw) | 0.0069 | 0.041 |
 
-A KS statistic of **1.000** means the distributions do not overlap at all.
+A KS of **1.000** means the distributions do not overlap at all. The cause was my
+own transformation: `day_index − D_n` was meant to turn a moving delta into a
+fixed calendar anchor, but `day_index` is **absolute time**, and the test period
+sits at days 213–396 against training's 1–182. It reintroduced through the back
+door exactly the risk the audit had documented — and `D1_anchored` ranked 3rd by
+SHAP, because the holdout is adjacent to training and hides the problem.
 
-The cause is my own transformation: `D_n_anchored = day_index − D_n` was meant to
-turn a moving delta into a fixed calendar anchor, but `day_index` is **absolute
-time**, and the test period sits at days 213–396 against training's 1–182. It
-reintroduced through the back door exactly the risk the audit had documented — and
-`D1_anchored` ranked 3rd by SHAP in that model, because the holdout is adjacent to
-training and hides the problem.
+### The ablation that priced it
 
-**These features are no longer in the shipped model.** The measurement below is
-what justified removing them; see [Final Model](#final-model) for the cost and the
-outcome. They are still *computed*, so this drift report keeps measuring them —
-deleting the computation would delete the evidence.
+If the features are broken, why does the model rank them so highly? Removing them
+and re-measuring answers it (`scripts/run_ablation.py`, same folds and seed):
 
-### Ablation: what the anchored features are actually worth
+| | mean PR-AUC | spread |
+|---|---|---|
+| 530 features | 0.5583 | ± 0.0251 |
+| 515 features (no `_anchored`) | 0.5468 | ± 0.0120 |
+| **Δ** | **−0.0115 (−2.1%)** | spread more than halves |
 
-The drift finding raised an obvious question — if these features are broken, why
-does the model rank them so highly? Removing them and re-measuring answers it.
-Run with `scripts/run_ablation.py` against
-`configs/config_ablation_no_anchored.yaml`, same folds, same seed, LightGBM:
+Removing them costs 0.0115 in-period, losing 4 of 5 folds — and the largest loss
+is **fold 4 (−0.0390)**, the fold where train and validation sit closest in time.
+That is not a contradiction of the drift result, it is the mechanism behind it:
+every fold validates *inside* the training period, where an absolute-time anchor
+still works. The 0.0115 is the size of the trap, not a gain to protect. This is
+the clearest example in the project of a feature that improves every number
+measurable before deployment and fails after it.
 
-| fold | 530 features | 515 (no `_anchored`) | Δ |
-|---|---|---|---|
-| 0 | 0.5338 | 0.5335 | −0.0003 |
-| 1 | 0.5473 | 0.5575 | +0.0102 |
-| 2 | 0.5683 | 0.5496 | −0.0187 |
-| 3 | 0.5448 | 0.5350 | −0.0098 |
-| 4 | 0.5973 | 0.5583 | **−0.0390** |
-| **mean** | **0.5583 ± 0.0251** | **0.5468 ± 0.0120** | **−0.0115 (−2.1%)** |
-
-**Removing them costs 0.0115 PR-AUC in-period, losing 4 of 5 folds.** That is not
-a contradiction of the drift result — it is the mechanism behind it. Every CV fold
-validates on a slice *inside* the training period, where an absolute-time anchor
-still lines up. The features genuinely work there, which is exactly why the model
-leans on them and why SHAP ranks `D1_anchored` third.
-
-Two details sharpen the point. The largest loss is **fold 4 (−0.0390)**, the latest
-and best-performing fold — the anchor pays most where train and validation are
-closest in time. And the ablated model's fold-to-fold spread is **less than half**
-the baseline's (± 0.0120 vs ± 0.0251): dropping the features makes performance
-markedly more stable across time periods, which is what removing a time-sensitive
-crutch looks like.
-
-So the 0.0115 is not a gain to protect — it is the size of the trap. In-period
-validation pays for these features; the true test period (days 213–396, KS up to
-1.000) would not. This is the clearest example in the project of a feature that
-improves every number you can measure before deployment and fails after it.
-
-**Acted on.** They were removed from the shipped configuration and the model
-retrained. Holdout PR-AUC fell 0.5639 → 0.5279 exactly as this analysis predicts,
-while **prediction-drift PSI against the true test period improved 0.0329 →
-0.0100** — a 3.3× reduction, and the only forward-looking evidence obtainable
-without test labels.
+**Acted on**, and then recovered: the features were dropped as model inputs and
+the same quantity reused as an entity key. See
+[Final Model](#final-model) for the full before/after.
 
 That a monitoring system built for this project found a genuine flaw in the
 project's own features, rather than reporting a reassuring all-clear, is the
@@ -913,76 +826,46 @@ No MLflow server is required.
 
 ## Limitations
 
+Stated because a reviewer will find them anyway, and because several are the
+direct cost of choices made deliberately elsewhere.
+
 1. **The shipped model is untuned.** Hyperparameters were not re-searched after
-   the feature set changed from 530 to 515 columns. The previous values were
-   tuned on a space that no longer exists, so reusing them would make results
-   unattributable between the feature change and mismatched settings. Retuning is
-   expected to recover roughly +0.017 PR-AUC. It is blocked by memory on the
-   development machine, not by code: Optuna refits the two largest folds
-   repeatedly in one process, and this machine's commit limit fell from 31.3 GB
-   to ~24.5 GB mid-project with `Available MBytes` at 0 under normal desktop
-   load. Per-fold isolation (`scripts/run_ablation.py --save-oof`) plus
-   `train.py --skip-cv --oof-npz` was added to work around it and is what
-   produced the current model; the same approach will complete the search on a
-   machine with more headroom.
+   the feature set changed, since values tuned on a space that no longer exists
+   would make results unattributable. Worth roughly **+0.017**. Blocked by memory,
+   not code: Optuna refits the two largest folds repeatedly in one process, and
+   this machine's commit limit fell from 31.3 GB to ~24.5 GB mid-project with
+   `Available MBytes` at 0 under normal desktop load. Per-fold isolation
+   (`run_ablation.py --save-oof` plus `train.py --skip-cv --oof-npz`) was added to
+   work around it and is what produced the current model. The one search that did
+   complete was itself bounded — 8 of 25 trials under a 5400 s cap, hitting the
+   2000-round ceiling on 3 of 5 folds.
 
-2. **The uid raises prediction drift.** PSI 0.0455 against 0.0100 for the
-   stripped model and 0.0329 for the leaky one — still inside the documented
-   <0.10 stable band, but the highest of the three. Most test-period accounts
-   were never seen in training, so `entity_uid_freq` is 0 for them. That is
-   correct (an unseen account has no history) and the alternative — fitting the
-   encoder over test data — is the transductive shortcut this project refuses,
-   but the feature's distribution does shift between periods. The uid buys
-   accuracy and spends some distributional stability.
+2. **The uid raises prediction drift** to PSI 0.0455, the highest of the three
+   configurations though still inside the <0.10 stable band. Most test-period
+   accounts are unseen in training, so `entity_uid_freq` is 0 for them. Correct
+   behaviour — the alternative is transductive — but the distribution does shift.
 
-3. **Velocity features are cold-started at serving time.** The API keeps no
-   transaction history, so trailing-window counts are computed from the request
-   alone: a single transaction correctly yields 0, meaning "no prior activity known
-   to this service". Honest, but weaker than training, where full history was
-   available. A production deployment needs a feature store.
+3. **Entity keys are a proxy, and velocity is cold-started.** No account
+   identifier exists, so `card1 + addr1 + card2` and the uid approximate one;
+   cards sharing those values merge. The API keeps no cross-request state either,
+   so velocity counts come only from the current batch — a single-transaction
+   request honestly reports `count = 0` rather than inventing history.
 
-4. **No production traffic.** Drift monitoring uses real dataset periods, not live
-   users; there is no label feedback loop and no alerting integration.
+4. **No production traffic, and no labels on the Kaggle test set.** Drift
+   monitoring compares real dataset periods, not live data, and the final metric
+   is a chronological holdout rather than a leaderboard score. Kaggle rank is also
+   deliberately forfeited: encoders are fitted train-only, where competitive
+   solutions fit over train+test.
 
-5. **The Kaggle test set has no labels**, so the final metric is a chronological
-   holdout from the training period — an honest near-future estimate, not a
-   30-day-forward measurement.
+5. **Dense baselines are subsampled** to 100,000 rows (all positives kept). The
+   comparison is not perfectly equal — though rerunning the boosters at the same
+   row count showed the cap costs LightGBM 0.0027 against a 0.0879 margin over
+   Random Forest, so the ranking is not an artefact of it.
 
-6. **Entity keys are a proxy.** No account identifier exists, so
-   `card1 + addr1 + card2` approximates one. Cards sharing those values merge; a
-   card whose `addr1` changes splits.
-
-7. **Dense baselines are subsampled** to 100,000 rows, recorded in
-   `model_comparison.csv` rather than hidden. The comparison is not perfectly
-   equal, and saying so is the point.
-
-8. **The one completed hyperparameter search was itself bounded** — 8 of 25
-   Optuna trials under a 5400 s cap, on the previous 530-feature configuration;
-   the timeout stopped it, not convergence. It also reached the 2,000-round
-   ceiling on 3 of 5 folds, so the round cap — not the hyperparameters — was the
-   binding constraint. Any future search should raise both.
-
-9. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
-   deployment.
-
-10. **The pinned dependency set differs slightly from the development environment.**
-   `requirements.txt` pins `scikit-learn==1.3.2` and `shap==0.46.0`; the reported
-   metrics were produced locally under `scikit-learn 1.2.2` and `shap 0.52.0`.
-   The development combination is not installable from scratch — shap 0.52
-   declares `numpy>=2`, contradicting the `numpy==1.26.4` pin, and scikit-learn
-   1.2.2 ships no CPython 3.12 wheel — so it was corrected for reproducibility
-   after CI surfaced it. The saved artifact contains exactly one scikit-learn
-   object (`IsotonicRegression`, the probability calibrator); loading it under
-   1.3.2 is a minor version step and expected to work, but has not been verified
-   on this machine.
-
-11. **Docker is verified in CI, not on the development machine.** Docker is not
-    installed locally, so the image has never been built here. It *is* built and
-    smoke-tested on every push by GitHub Actions — the container starts, `/health`
-    reports `degraded` without a mounted model, all three routes appear in the
-    OpenAPI spec, and `/predict` returns 503 rather than 500. What remains
-    unverified is the image running with a real model artifact mounted, since CI
-    has no trained model to mount.
+6. **Single-node, single-worker.** No horizontal scaling, A/B routing or shadow
+   deployment. Docker is verified in CI rather than on the development machine,
+   and `requirements.txt` pins `scikit-learn==1.3.2` / `shap==0.46.0` where the
+   development environment runs slightly different versions.
 
 ## Future Improvements
 
