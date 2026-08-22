@@ -23,6 +23,22 @@ features:
   velocity_windows_hours: [1, 24, 168]
   frequency_encode_min_count: 2
   anchor_d_columns: true
+  # D*_anchored features are EXCLUDED from the shipped model. They are computed
+  # (anchor_d_columns stays true, so the drift report can keep measuring them)
+  # but dropped before the model sees them.
+  #
+  # Reason: D_n_anchored = day_index - D_n anchors to ABSOLUTE time. Training
+  # covers days 1-182; deployment and the Kaggle test period sit at days
+  # 213-396. All 15 drift severely against that period, KS up to 1.000 - the
+  # distributions do not overlap at all - while the raw D columns they derive
+  # from stay stable (D1 KS 0.041).
+  #
+  # They are worth +0.0115 PR-AUC in-period, which is precisely the problem:
+  # every fold validates inside the training period, where an absolute-time
+  # anchor still lines up. That 0.0115 is the size of the trap, not a gain.
+  # Keeping a feature you have proven fails under the shift you will actually
+  # face is not a trade-off, it is a known defect.
+  exclude_feature_suffixes: ["_anchored"]
 
 train:
   # PR-AUC, not ROC-AUC: at 3.4993% prevalence the 569,877 negatives swamp the

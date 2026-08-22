@@ -16,6 +16,8 @@ import csv
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.splitting import load_folds  # noqa: E402
@@ -34,6 +36,12 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--fold", type=int, required=True)
     parser.add_argument("--label", required=True)
+    parser.add_argument(
+        "--save-oof",
+        type=Path,
+        default=None,
+        help="Save this fold's out-of-fold probabilities (.npy) for calibration.",
+    )
     parser.add_argument("--model", default="lightgbm")
     parser.add_argument(
         "--force-subsample",
@@ -61,6 +69,13 @@ def main() -> int:
         max_dense_rows=args.force_subsample,
         force_subsample=args.force_subsample is not None,
     )
+    if args.save_oof is not None:
+        if result.oof_predictions is None:
+            raise SystemExit("train_cv returned no out-of-fold predictions")
+        args.save_oof.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.save_oof, result.oof_predictions)
+        print(f"saved out-of-fold probabilities -> {args.save_oof}")
+
     fold_result = result.fold_results[0]
     m = fold_result.metrics
 

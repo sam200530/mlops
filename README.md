@@ -334,6 +334,40 @@ than the hyperparameters is the binding constraint.
 
 ## Final Model
 
+> ### ⚠️ Status: the shipped configuration changed; some metrics below are stale
+>
+> `configs/config.yaml` now **excludes the 15 `D*_anchored` features** from the
+> model. They drift completely against the deployment period (KS up to 1.000) and
+> keeping a feature proven to fail under the exact shift the model will face is a
+> defect, not a trade-off. The rationale is recorded in the config itself.
+>
+> **Measured under the new configuration** (515 features, 5-fold purged temporal
+> CV, complete):
+>
+> | | PR-AUC |
+> |---|---|
+> | Untuned LightGBM, 515 features | **0.5468 ± 0.0120** |
+> | Untuned LightGBM, 530 features (previous) | 0.5583 ± 0.0251 |
+>
+> Note the **halved fold-to-fold spread** — removing the time-sensitive features
+> makes performance markedly more stable across periods, which is the point.
+>
+> **Not yet re-measured under the new configuration:** the tuned hyperparameters,
+> the holdout score, SHAP rankings and the drift report. Every such figure below
+> was produced with the anchored features present and should be read as belonging
+> to the *previous* configuration until the retrain completes. The retrain is
+> blocked on this machine's memory, not on the code — see
+> [Limitations](#limitations).
+>
+> Reproduce with:
+> ```bash
+> python scripts/run_ablation.py --fold 4 --label final_oof --save-oof reports/oof_fold4.npy
+> python scripts/train.py --models lightgbm --skip-cv --no-tune --oof-npz reports/oof_fold4.npy
+> python scripts/evaluate.py --partition holdout
+> python scripts/monitor.py
+> ```
+
+
 **LightGBM**, Optuna-tuned, isotonic-calibrated, trained on all 472,432 modelling
 rows. Hyperparameters: `learning_rate` 0.0165, `num_leaves` 240,
 `min_child_samples` 162, `feature_fraction` 0.864, `bagging_fraction` 0.958,
@@ -718,7 +752,20 @@ No MLflow server is required.
 
 ## Limitations
 
-1. **The `D*_anchored` features are a known defect in the shipped model.** All 15
+1. **The `D*_anchored` features have been removed from the shipped
+   configuration**, and the retrain to regenerate every dependent metric is
+   incomplete. `configs/config.yaml` excludes them; the 5-fold CV under the new
+   configuration is measured (0.5468 ± 0.0120), but retuning, the holdout score,
+   SHAP and drift are not yet rerun. The blocker is memory, not code: this
+   machine's commit limit fell from 31.3 GB to ~24.5 GB mid-project and
+   `Available MBytes` sits at 0 under normal desktop load, so LightGBM cannot get
+   the 656 MB contiguous block that fold 4 needs. Per-fold isolation
+   (`scripts/run_ablation.py`) and a float32 downcast already halved the
+   requirement. The commands to finish are in [Final Model](#final-model). Until
+   then, treat tuned/holdout/SHAP/drift figures as belonging to the previous
+   530-feature configuration.
+
+2. **Why they were removed (previously described here as a known defect).** All 15
    drift severely against the true test period (KS up to 1.000) because the anchor
    derives from absolute time. They rank highly by SHAP and the holdout metrics
    include them, because the holdout is adjacent in time to training and hides the
@@ -729,36 +776,36 @@ No MLflow server is required.
    why the defect is invisible to every pre-deployment metric. Documented rather
    than quietly patched, because a measurement — not a guess — identified it.
 
-2. **Velocity features are cold-started at serving time.** The API keeps no
+3. **Velocity features are cold-started at serving time.** The API keeps no
    transaction history, so trailing-window counts are computed from the request
    alone: a single transaction correctly yields 0, meaning "no prior activity known
    to this service". Honest, but weaker than training, where full history was
    available. A production deployment needs a feature store.
 
-3. **No production traffic.** Drift monitoring uses real dataset periods, not live
+4. **No production traffic.** Drift monitoring uses real dataset periods, not live
    users; there is no label feedback loop and no alerting integration.
 
-4. **The Kaggle test set has no labels**, so the final metric is a chronological
+5. **The Kaggle test set has no labels**, so the final metric is a chronological
    holdout from the training period — an honest near-future estimate, not a
    30-day-forward measurement.
 
-5. **Entity keys are a proxy.** No account identifier exists, so
+6. **Entity keys are a proxy.** No account identifier exists, so
    `card1 + addr1 + card2` approximates one. Cards sharing those values merge; a
    card whose `addr1` changes splits.
 
-6. **Dense baselines are subsampled** to 100,000 rows, recorded in
+7. **Dense baselines are subsampled** to 100,000 rows, recorded in
    `model_comparison.csv` rather than hidden. The comparison is not perfectly
    equal, and saying so is the point.
 
-7. **Bounded hyperparameter search** — 8 of 25 Optuna trials under a 5400 s cap;
+8. **Bounded hyperparameter search** — 8 of 25 Optuna trials under a 5400 s cap;
    the timeout stopped it, not convergence. The tuned model also reached the
    2,000-round ceiling on 3 of 5 folds, so the round cap — not the hyperparameters
    — is the binding constraint on further gains.
 
-8. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
+9. **Single-node, single-worker.** No horizontal scaling, A/B routing, or shadow
    deployment.
 
-9. **The pinned dependency set differs slightly from the development environment.**
+10. **The pinned dependency set differs slightly from the development environment.**
    `requirements.txt` pins `scikit-learn==1.3.2` and `shap==0.46.0`; the reported
    metrics were produced locally under `scikit-learn 1.2.2` and `shap 0.52.0`.
    The development combination is not installable from scratch — shap 0.52
@@ -769,7 +816,7 @@ No MLflow server is required.
    1.3.2 is a minor version step and expected to work, but has not been verified
    on this machine.
 
-10. **Docker is verified in CI, not on the development machine.** Docker is not
+11. **Docker is verified in CI, not on the development machine.** Docker is not
     installed locally, so the image has never been built here. It *is* built and
     smoke-tested on every push by GitHub Actions — the container starts, `/health`
     reports `degraded` without a mounted model, all three routes appear in the
@@ -781,7 +828,7 @@ No MLflow server is required.
 
 Roughly in order of value per unit of effort:
 
-1. **Remove or reformulate `D*_anchored` and retrain.** They measurably harm
+12. **Remove or reformulate `D*_anchored` and retrain.** They measurably harm
    temporal generalisation. Either drop them (the raw `D` columns are stable and
    already present) or re-express the anchor relative to the transaction rather
    than to an absolute day index. The ablation above prices the decision: dropping
@@ -789,16 +836,16 @@ Roughly in order of value per unit of effort:
    reformulation is the better of the two options — it should recover the signal
    without the absolute-time dependence. The comparison must be rerun, since this
    changes the feature set behind the reported metrics.
-2. **A feature store for velocity**, so serving and training share one definition
+13. **A feature store for velocity**, so serving and training share one definition
    and cold starts do not degrade the first requests.
-3. **Adversarial validation to prune shift-heavy features** — 181 of 507 already
+14. **Adversarial validation to prune shift-heavy features** — 181 of 507 already
    drift significantly.
-4. **Cost-sensitive thresholding**: minimise expected monetary loss given
+15. **Cost-sensitive thresholding**: minimise expected monetary loss given
    chargeback and review costs, rather than optimising F1, which weights precision
    and recall equally as no fraud team does.
-5. **Revisit the 339 V columns on SHAP evidence** — kept deliberately for the
+16. **Revisit the 339 V columns on SHAP evidence** — kept deliberately for the
    baseline; correlation-clustering would shrink inference cost if PR-AUC holds.
-6. **Scheduled retraining** gated on holdout PR-AUC and drift.
+17. **Scheduled retraining** gated on holdout PR-AUC and drift.
 
 ---
 

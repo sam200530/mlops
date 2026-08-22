@@ -27,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -168,6 +169,26 @@ def main() -> int:
         help="Also run random stratified CV to quantify how optimistic it is.",
     )
     parser.add_argument(
+        "--oof-npz",
+        type=Path,
+        default=None,
+        help=(
+            "Load out-of-fold probabilities from a .npy written by "
+            "scripts/run_ablation.py --save-oof, instead of recomputing CV. Only the "
+            "last fold's validation slice is used, for calibration and threshold."
+        ),
+    )
+    parser.add_argument(
+        "--skip-cv",
+        action="store_true",
+        help=(
+            "Skip the model-comparison CV loop and go straight to tuning, final fit "
+            "and holdout. Use when fold metrics were already produced per-process by "
+            "scripts/run_ablation.py; the five-fold loop holds more memory at once "
+            "than some machines can give it."
+        ),
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -206,7 +227,7 @@ def main() -> int:
         mlflow.log_dict(split_metadata, "split_metadata.json")
 
         # --- baselines: identical folds for every model ---------------------
-        for model_name in args.models:
+        for model_name in [] if args.skip_cv else args.models:
             logger.info("=" * 70)
             logger.info("Cross-validating %s", model_name)
             result = train_cv(
@@ -250,10 +271,16 @@ def main() -> int:
             )
 
         # --- select winner on CV PR-AUC -------------------------------------
-        best_name = max(cv_results, key=lambda name: cv_results[name].mean_metric("pr_auc"))
-        logger.info(
-            "Selected %s on CV PR-AUC %.4f", best_name, cv_results[best_name].mean_metric("pr_auc")
-        )
+        if args.skip_cv:
+            best_name = args.models[0]
+            logger.info("Skipped CV; taking %s as the model to tune and fit", best_name)
+        else:
+            best_name = max(cv_results, key=lambda name: cv_results[name].mean_metric("pr_auc"))
+            logger.info(
+                "Selected %s on CV PR-AUC %.4f",
+                best_name,
+                cv_results[best_name].mean_metric("pr_auc"),
+            )
         mlflow.log_param("selected_model", best_name)
 
         # --- tuning ---------------------------------------------------------
@@ -289,27 +316,52 @@ def main() -> int:
             tuned_row["model"] = f"{best_name}_tuned"
             rows.append(tuned_row)
             _log_cv_result(mlflow, tuned)
-            if tuned.mean_metric("pr_auc") > cv_results[best_name].mean_metric("pr_auc"):
+            baseline_pr_auc = (
+                cv_results[best_name].mean_metric("pr_auc") if best_name in cv_results else None
+            )
+            if baseline_pr_auc is None or tuned.mean_metric("pr_auc") > baseline_pr_auc:
                 cv_results[f"{best_name}_tuned"] = tuned
-                logger.info(
-                    "Tuning improved CV PR-AUC %.4f -> %.4f",
-                    cv_results[best_name].mean_metric("pr_auc"),
-                    tuned.mean_metric("pr_auc"),
-                )
+                if baseline_pr_auc is None:
+                    logger.info(
+                        "Tuned CV PR-AUC %.4f (no in-run baseline; CV was skipped)",
+                        tuned.mean_metric("pr_auc"),
+                    )
+                else:
+                    logger.info(
+                        "Tuning improved CV PR-AUC %.4f -> %.4f",
+                        baseline_pr_auc,
+                        tuned.mean_metric("pr_auc"),
+                    )
             else:
                 logger.info(
                     "Tuning did not improve CV PR-AUC (%.4f vs %.4f) — keeping baseline params",
                     tuned.mean_metric("pr_auc"),
-                    cv_results[best_name].mean_metric("pr_auc"),
+                    baseline_pr_auc,
                 )
                 best_params = {}
 
         # --- calibration + threshold from the last fold ---------------------
-        selected_cv = cv_results.get(f"{best_name}_tuned", cv_results[best_name])
         last_train_idx, last_val_idx = temporal_folds[-1]
-        oof = selected_cv.oof_predictions
-        if oof is None:
-            raise RuntimeError("Selected CV result has no out-of-fold predictions")
+        if args.oof_npz is not None:
+            oof = np.load(args.oof_npz)
+            if len(oof) != len(modelling):
+                raise SystemExit(f"{args.oof_npz} has {len(oof)} rows, expected {len(modelling)}")
+            if np.isnan(oof[last_val_idx]).any():
+                raise SystemExit(
+                    f"{args.oof_npz} has no predictions for the last fold's validation "
+                    "rows — it must come from `run_ablation.py --fold 4 --save-oof`."
+                )
+            logger.info("Loaded out-of-fold probabilities from %s", args.oof_npz)
+        else:
+            selected_cv = cv_results.get(f"{best_name}_tuned") or cv_results.get(best_name)
+            if selected_cv is None:
+                raise SystemExit(
+                    "No CV result to calibrate on. Either drop --skip-cv, or pass "
+                    "--oof-npz with predictions from run_ablation.py --save-oof."
+                )
+            oof = selected_cv.oof_predictions
+            if oof is None:
+                raise RuntimeError("Selected CV result has no out-of-fold predictions")
         validation_probabilities = oof[last_val_idx]
         validation_targets = modelling[TARGET].to_numpy()[last_val_idx]
 
