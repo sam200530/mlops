@@ -34,9 +34,14 @@ from src.data.preprocessing import CategoricalCodeEncoder, _is_categorical_like
 from src.data.schema import EXCLUDED_FROM_FEATURES, KEY, TIME_COL
 from src.features.aggregations import EntityAmountAggregator, FrequencyEncoder
 from src.features.builders import (
+    AGGREGATION_KEY_COLUMNS,
     DAY_COL,
     ENTITY_KEY_COLUMNS,
+    UID_COLUMN,
+    add_uid_entity_key,
+    add_v_nan_group_features,
     build_stateless_features,
+    v_nan_groups,
 )
 from src.features.velocity import add_velocity_features
 
@@ -60,11 +65,28 @@ FREQUENCY_COLUMNS: tuple[str, ...] = (
     "_entity_card",
     "_entity_card_addr",
     "_entity_card_full",
+    # How many transactions this synthetic account has. Fitted on train only,
+    # so unseen accounts map to 0 rather than leaking a test-period count.
+    "_entity_uid",
 )
 
 #: Helper columns used to build features, then dropped. Absolute time and raw
 #: entity keys must never reach the model (audit §7.6, §7.7).
 INTERNAL_PREFIX = "_"
+
+
+def _ensure_uid(df: pd.DataFrame) -> pd.DataFrame:
+    """Add the uid entity key if the frame predates it.
+
+    ``_entity_uid`` is produced by :func:`build_stateless_features`, so freshly
+    built datasets already carry it. Parquet written before the key existed does
+    not, and rebuilding the whole dataset to add one row-local column would be
+    wasteful. The key depends only on values already present in the frame, so
+    recomputing it here is identical to having built it earlier.
+    """
+    if UID_COLUMN in df.columns:
+        return df
+    return add_uid_entity_key(df.copy())
 
 
 @dataclass
@@ -83,6 +105,11 @@ class FeaturePipeline:
     frequency_encoder: FrequencyEncoder = field(default_factory=FrequencyEncoder)
     entity_aggregator: EntityAmountAggregator = field(default_factory=EntityAmountAggregator)
     categorical_encoder: CategoricalCodeEncoder = field(default_factory=CategoricalCodeEncoder)
+    #: V missingness blocks learned from the training partition. Fitted rather
+    #: than derived per frame: the grouping depends on which rows are present,
+    #: so recomputing it at transform time would change the feature set and let
+    #: validation rows influence their own encoding.
+    v_nan_groups: dict[int, list[str]] = field(default_factory=dict)
     feature_names: list[str] = field(default_factory=list)
     categorical_features: list[str] = field(default_factory=list)
     is_fitted: bool = False
@@ -128,9 +155,12 @@ class FeaturePipeline:
         if DAY_COL not in train_df.columns:
             raise RuntimeError("fit() requires a frame returned by prepare()")
 
+        train_df = _ensure_uid(train_df)
+        self.v_nan_groups = v_nan_groups(train_df)
+        train_df = add_v_nan_group_features(train_df.copy(), self.v_nan_groups)
         self.frequency_encoder.min_count = self.frequency_min_count
         self.frequency_encoder.fit(train_df, list(FREQUENCY_COLUMNS))
-        self.entity_aggregator.fit(train_df, list(ENTITY_KEY_COLUMNS))
+        self.entity_aggregator.fit(train_df, list(AGGREGATION_KEY_COLUMNS))
 
         # Determine the final feature list by transforming a small slice, so the
         # column set is derived from real output rather than predicted.
@@ -173,6 +203,9 @@ class FeaturePipeline:
 
     def _apply_fitted(self, df: pd.DataFrame) -> pd.DataFrame:
         """Concatenate fitted-encoder output onto ``df`` without mutating it."""
+        df = _ensure_uid(df)
+        if self.v_nan_groups:
+            df = add_v_nan_group_features(df.copy(), self.v_nan_groups)
         return pd.concat(
             [
                 df,

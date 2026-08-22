@@ -274,6 +274,20 @@ reflects whatever was executed last, so the table here is the canonical record.
 **Boosting is measured to be better, not assumed** — untuned LightGBM beats Random
 Forest by +0.091 PR-AUC and Logistic Regression by +0.202.
 
+**CatBoost was run and lost too.** Added because its ordered target statistics
+handle high-cardinality categoricals differently from LightGBM's split-based
+approach, and this dataset is largely high-cardinality categorical — so the
+difference was measured rather than assumed. On fold 4 with the hybrid feature
+set it scored **0.5368 against LightGBM's 0.5845**, taking **1431 s against
+310 s** — 4.6× the cost for 0.048 less PR-AUC. Reported from a single fold: at
+~24 minutes per fold a full five-fold run is two hours, and the gap is more than
+twice the fold-to-fold spread, so more folds would not change the conclusion.
+
+Worth noting *why* it lost here when it won in the reference solution: that run
+used a GPU with 5000 trees and transductive train+test encodings. On CPU at 2000
+trees with train-only encoding, the advantage does not transfer. A model's
+reported strength is a property of its setup as much as its algorithm.
+
 **XGBoost was run and lost.** It was given a search space mirrored to LightGBM's,
 the same native categorical handling, the same folds and the same early-stopping
 rule, so the comparison reflects the algorithms rather than the setup. It came in
@@ -365,6 +379,62 @@ under the exact shift the model will face is a defect, not a trade-off.
 `anchor_d_columns` remains `true`, so the features are still computed and the
 drift report keeps measuring them. Removing their computation would destroy the
 evidence that justified excluding them.
+
+### Recovering the loss honestly: the uid entity key
+
+Removing the anchored features cost real accuracy. It was recovered — without
+reintroducing leakage — by using the *same quantity* a different way.
+
+`D1 - day_index` is constant for a given card: it encodes when the account was
+first seen. As a **numeric feature** that value drifts completely against the
+deployment period (KS 1.000), which is why it was removed. As a **grouping key**
+the drift is irrelevant: two transactions from one card land in the same group in
+any period, because the key is compared for *equality*, not magnitude. Identity
+survives distribution shift; magnitude does not.
+
+So `_entity_uid` = card fields + `D1 - day_index`, hashed deterministically
+(`add_uid_entity_key`). It yields **194,519 groups over 472,432 rows** (2.43
+transactions each) against the previous `card1 + addr1 + card2` key's 37,859 — a
+5× finer account approximation. Frequency and amount aggregates over it are
+fitted on the **training partition only**, as with every other encoder here.
+
+Added alongside it: **V missingness-block summaries**, reducing the 339
+anonymised V columns to a per-row mean and std for each block of columns sharing
+a null count (13 blocks on the full training partition).
+
+| fold | 530 feat *(leaky)* | 515 feat *(clean)* | **545 feat (hybrid)** | vs clean |
+|---|---|---|---|---|
+| 0 | 0.5338 | 0.5335 | 0.5375 | +0.0040 |
+| 1 | 0.5473 | 0.5575 | 0.5723 | +0.0147 |
+| 2 | 0.5683 | 0.5496 | 0.5575 | +0.0079 |
+| 3 | 0.5448 | 0.5350 | 0.5436 | +0.0086 |
+| 4 | 0.5973 | 0.5583 | 0.5845 | +0.0262 |
+| **mean** | **0.5583 ± 0.0251** | **0.5468 ± 0.0120** | **0.5591 ± 0.0195** | **+0.0123** |
+
+**Improves 5 folds out of 5, and at 0.5591 slightly exceeds the original leaky
+model's 0.5583.** The cost of removing the drifting features is fully recovered
+with train-only encoding — there is no accuracy-versus-integrity trade left to
+make here.
+
+The V blocks are fitted per fold, so feature counts differ slightly across folds
+(541–545): later folds train on more rows, so more blocks clear the null-count
+threshold. Group membership is a **fitted parameter**, not derived per frame —
+deriving it per frame gives 14 groups on the full partition and 13 on a 30k
+slice, which would both break the fit/transform contract and let validation rows
+influence their own encoding.
+
+### Credit and what was deliberately not taken
+
+The uid construction is adapted from the IEEE-CIS 17th-place solution. That
+solution scores **0.952 ROC-AUC** on this exact split against this project's
+0.902, and most of the gap is technique this project refuses on purpose: its
+frequency encodings, uid aggregations and time-block encodings are all fitted
+over `concat(train, test)`, and one feature is literally
+`TransactionAmt.isin(test.TransactionAmt)`. That is transductive — legal on
+Kaggle, undeployable in production, and the thing
+[Leakage-Safe Feature Engineering](#leakage-safe-feature-engineering) exists to
+prevent. The uid *idea* transfers cleanly; the encoding of it does not, so it was
+reimplemented train-only.
 
 ### What removal cost, and what it bought
 

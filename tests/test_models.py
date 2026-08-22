@@ -7,6 +7,7 @@ comparison is only meaningful if each is configured the way it is claimed to be.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.models.estimators import (
@@ -14,6 +15,7 @@ from src.models.estimators import (
     REQUIRES_DENSE_IMPUTED,
     build_model,
     fit_with_early_stopping,
+    prepare_frame_for_model,
     scale_pos_weight,
 )
 
@@ -37,12 +39,12 @@ class TestBuildModel:
 
     def test_unknown_model_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="Unknown model"):
-            build_model("catboost", seed=1)  # type: ignore[arg-type]
+            build_model("not_a_real_model", seed=1)  # type: ignore[arg-type]
 
     def test_boosters_take_native_categoricals_and_nan(self) -> None:
-        """Neither booster may be handed an imputed dense matrix — routing NaN
+        """No booster may be handed an imputed dense matrix — routing NaN
         natively is why they are preferred on this dataset."""
-        assert {"lightgbm", "xgboost"} == BOOSTED_MODELS
+        assert {"lightgbm", "xgboost", "catboost"} == BOOSTED_MODELS
         assert not (BOOSTED_MODELS & REQUIRES_DENSE_IMPUTED)
 
     def test_xgboost_is_configured_for_categoricals_and_pr_auc(self) -> None:
@@ -93,3 +95,21 @@ class TestEarlyStopping:
     def test_non_boosted_model_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="does not support early stopping"):
             fit_with_early_stopping(None, "random_forest", None, None, None, None, [])
+
+    def test_catboost_is_configured_for_pr_auc_on_cpu(self) -> None:
+        params = build_model("catboost", seed=1, n_jobs=1).get_params()
+        assert params["eval_metric"] == "PRAUC"
+        assert params["depth"] == 8
+        # The reference solution used a GPU; this project has none, so the
+        # tree budget matches the other boosters rather than their 5000.
+        assert params["iterations"] == 2000
+
+    def test_catboost_categorical_fill_is_applied_and_others_untouched(self) -> None:
+        """CatBoost rejects NaN in categoricals; the fill must be identical at
+        fit and predict, and must not alter the other models' input."""
+        frame = pd.DataFrame({"cat": pd.Series(["a", None], dtype="object"), "num": [1.0, np.nan]})
+        filled = prepare_frame_for_model(frame, "catboost", ["cat"])
+        assert filled["cat"].tolist() == ["a", "__missing__"]
+        assert np.isnan(filled["num"].iloc[1]), "numeric NaN must stay for native routing"
+        for other in ("lightgbm", "xgboost"):
+            assert prepare_frame_for_model(frame, other, ["cat"]) is frame

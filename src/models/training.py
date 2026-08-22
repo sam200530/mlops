@@ -33,6 +33,7 @@ from src.models.estimators import (
     ModelName,
     build_model,
     fit_with_early_stopping,
+    prepare_frame_for_model,
     scale_pos_weight,
 )
 
@@ -200,7 +201,9 @@ def _fit_one(
             y_train[tail],
             pipeline.categorical_features,
         )
-        probabilities = model.predict_proba(X_validation)[:, 1]
+        probabilities = model.predict_proba(
+            prepare_frame_for_model(X_validation, model_name, pipeline.categorical_features)
+        )[:, 1]
         n_features = X_train.shape[1]
         del X_train, X_validation
 

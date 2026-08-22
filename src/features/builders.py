@@ -16,6 +16,7 @@ mechanism are not added.
 from __future__ import annotations
 
 import logging
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -212,6 +213,115 @@ def add_anchored_d_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+UID_COLUMN = "_entity_uid"
+
+#: Columns the synthetic account id is built from. All are row-local.
+UID_COMPONENTS = (
+    "ProductCD",
+    "card1",
+    "card2",
+    "card3",
+    "card4",
+    "card5",
+    "card6",
+    "addr1",
+)
+
+
+def v_nan_groups(df: pd.DataFrame) -> dict[int, list[str]]:
+    """Group V columns by identical null count.
+
+    The 339 V columns are anonymised and highly redundant, but their *missing*
+    patterns are structured: columns sharing a null count belong to the same
+    underlying block. Returned keyed by null count and sorted deterministically
+    by the caller.
+
+    This is a **population statistic** — the groups depend on which rows the
+    frame contains, so a 30k slice yields 13 groups where the full training
+    partition yields 14. It must therefore be fitted on the training partition
+    and reused verbatim at transform time; deriving it per frame would make the
+    feature set differ between fit and transform, and would also let the
+    validation rows influence their own encoding.
+    """
+    v_columns = [c for c in df.columns if c.startswith("V") and c[1:].isdigit()]
+    groups: dict[int, list[str]] = {}
+    if not v_columns:
+        return groups
+    nulls = df[v_columns].isna().sum()
+    for col in v_columns:
+        count = int(nulls[col])
+        if count > 0:
+            groups.setdefault(count, []).append(col)
+    return groups
+
+
+def add_v_nan_group_features(df: pd.DataFrame, groups: dict[int, list[str]]) -> pd.DataFrame:
+    """Summarise each fitted V missingness block to a per-row mean and std.
+
+    Reducing a block of correlated columns to its level and spread gives the
+    model a compact view without feeding it 339 columns. Purely row-wise given
+    the group definition: each output depends only on values in the same row.
+
+    Blocks are summarised one at a time so peak memory is a single block (the
+    largest is 46 columns) rather than the full V matrix.
+    """
+    if not groups:
+        return df
+    for index, count in enumerate(sorted(groups)):
+        block = [c for c in groups[count] if c in df.columns]
+        if not block:
+            continue
+        values = df[block].to_numpy(dtype="float32")
+        # A row can be entirely null within a block; nanmean/nanstd correctly
+        # return NaN there and warn about it. NaN is the answer we want -- the
+        # boosters route missing values natively -- so the warning is noise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            df[f"v_nan_group_{index}_mean"] = np.nanmean(values, axis=1).astype("float32")
+            df[f"v_nan_group_{index}_std"] = np.nanstd(values, axis=1).astype("float32")
+    return df
+
+
+def add_uid_entity_key(df: pd.DataFrame) -> pd.DataFrame:
+    """Build a synthetic account id from the card fields plus ``D1 - day_index``.
+
+    ``D1`` is a day-delta against a moving reference, so ``D1 - day_index`` is
+    *constant for a given card* — it encodes when the account was first seen.
+    Combined with the card attributes it approximates an account identifier far
+    more precisely than ``card1 + addr1 + card2`` does on its own.
+
+    This is the same quantity as :func:`add_anchored_d_features` produces, used
+    differently and deliberately so. As a *numeric feature* the anchor is
+    excluded from the model, because its value drifts completely against the
+    deployment period (KS 1.000 — see the drift report). As a *grouping key* that
+    drift is irrelevant: two transactions from one card fall in the same group
+    whatever period they occur in, because the key is compared for equality, not
+    magnitude. Identity is stable even when the number that encodes it is not.
+
+    Row-local, so this belongs in the prepare phase: nothing is learned from
+    other rows and no future information is touched. The aggregates computed
+    *over* these groups are fitted on the training partition only, as with every
+    other encoder here.
+    """
+    if DAY_COL not in df.columns:
+        raise KeyError(f"{DAY_COL} required — call add_time_features first")
+    missing = [c for c in UID_COMPONENTS if c not in df.columns]
+    if missing:
+        raise KeyError(f"add_uid_entity_key needs {missing}")
+
+    # Account-open anchor. NaN D1 yields NaN, which str() renders consistently,
+    # so those rows group together rather than each becoming a unique id.
+    anchor = df["D1"].to_numpy(dtype="float64") - df[DAY_COL].to_numpy(dtype="float64")
+
+    parts = [df[c].astype("string").fillna("na") for c in UID_COMPONENTS]
+    key = parts[0].str.cat(parts[1:], sep="_")
+    key = key.str.cat(pd.Series(anchor, index=df.index).astype("string"), sep="_")
+
+    # Deterministic across processes and partitions, unlike factorize codes.
+    df[UID_COLUMN] = pd.util.hash_pandas_object(key, index=False).astype("uint64")
+    return df
+
+
 def add_entity_keys(df: pd.DataFrame) -> pd.DataFrame:
     """Composite entity keys approximating a card/account.
 
@@ -274,6 +384,12 @@ def add_entity_keys(df: pd.DataFrame) -> pd.DataFrame:
 
 ENTITY_KEY_COLUMNS = ("_entity_card", "_entity_card_addr", "_entity_card_full")
 
+#: Keys the fitted aggregators group over. Wider than ENTITY_KEY_COLUMNS, which
+#: also drives velocity: velocity is computed once over the whole timeline
+#: during dataset build, so adding a key there means rebuilding the dataset,
+#: whereas aggregation keys are fitted per fold and cost nothing to extend.
+AGGREGATION_KEY_COLUMNS = (*ENTITY_KEY_COLUMNS, UID_COLUMN)
+
 
 def build_stateless_features(df: pd.DataFrame, anchor_d: bool = True) -> pd.DataFrame:
     """Apply every stateless builder in dependency order."""
@@ -286,5 +402,6 @@ def build_stateless_features(df: pd.DataFrame, anchor_d: bool = True) -> pd.Data
     if anchor_d:
         df = add_anchored_d_features(df)
     df = add_entity_keys(df)
+    df = add_uid_entity_key(df)
     logger.info("Stateless features: %d -> %d columns", n_before, df.shape[1])
     return df

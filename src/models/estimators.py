@@ -31,18 +31,19 @@ from typing import Any, Literal
 import lightgbm as lgb
 import numpy as np
 import xgboost as xgb
+from catboost import CatBoostClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
 logger = logging.getLogger(__name__)
 
-ModelName = Literal["logistic_regression", "random_forest", "lightgbm", "xgboost"]
+ModelName = Literal["logistic_regression", "random_forest", "lightgbm", "xgboost", "catboost"]
 
 #: Models that cannot accept NaN and therefore require the imputed matrix.
 REQUIRES_DENSE_IMPUTED: frozenset[str] = frozenset({"logistic_regression", "random_forest"})
 
 #: Models fitted with early stopping against an inner temporal slice.
-BOOSTED_MODELS: frozenset[str] = frozenset({"lightgbm", "xgboost"})
+BOOSTED_MODELS: frozenset[str] = frozenset({"lightgbm", "xgboost", "catboost"})
 
 #: Rounds without improvement before early stopping halts a boosted model.
 EARLY_STOPPING_ROUNDS = 100
@@ -219,6 +220,74 @@ def make_xgboost(
     )
 
 
+def catboost_params(
+    seed: int = 42,
+    n_jobs: int = -1,
+    imbalance_weight: float | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Baseline CatBoost parameters, mirrored to the other boosters.
+
+    CatBoost earns a place in the comparison because its ordered target
+    statistics handle high-cardinality categoricals differently from LightGBM's
+    split-based approach — and this dataset is largely high-cardinality
+    categorical, so that difference should show up rather than being assumed.
+
+    Depth 8 and learning rate 0.05 mirror the XGBoost defaults so the comparison
+    stays about the algorithm. ``task_type`` is left on CPU: the reference
+    solution this was drawn from used a GPU, which is not available here, so the
+    tree count is bounded to 2000 like the others rather than their 5000.
+    """
+    params: dict[str, Any] = {
+        "loss_function": "Logloss",
+        "eval_metric": "PRAUC",
+        "iterations": 2000,
+        "learning_rate": 0.05,
+        "depth": 8,
+        "l2_leaf_reg": 3.0,
+        "border_count": 127,
+        "random_seed": seed,
+        "thread_count": n_jobs if n_jobs and n_jobs > 0 else -1,
+        "verbose": False,
+        "allow_writing_files": False,
+    }
+    if imbalance_weight is not None:
+        params["scale_pos_weight"] = imbalance_weight
+    params.update(overrides)
+    return params
+
+
+def make_catboost(
+    seed: int = 42,
+    n_jobs: int = -1,
+    imbalance_weight: float | None = None,
+    **overrides: Any,
+) -> CatBoostClassifier:
+    """CatBoost classifier with this project's defaults."""
+    return CatBoostClassifier(
+        **catboost_params(seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides)
+    )
+
+
+def prepare_frame_for_model(X: Any, model_name: str, categorical_features: list[str]) -> Any:
+    """Apply model-specific input requirements to a feature frame.
+
+    Only CatBoost needs anything: it rejects NaN inside categorical columns, so
+    those are filled with an explicit sentinel level. This must be applied
+    identically at fit and at predict time — filling only at fit would raise on
+    the first validation row with a missing category, and filling differently
+    would be a training/serving skew. Numeric NaN is left alone; CatBoost routes
+    it natively, as LightGBM and XGBoost do.
+    """
+    if model_name != "catboost" or not categorical_features:
+        return X
+    X = X.copy()
+    for column in categorical_features:
+        if column in X.columns:
+            X[column] = X[column].astype("string").fillna("__missing__")
+    return X
+
+
 def fit_with_early_stopping(
     model: Any,
     model_name: str,
@@ -255,6 +324,20 @@ def fit_with_early_stopping(
         model.fit(X_train, y_train, eval_set=[(X_eval, y_eval)], verbose=False)
         return int(getattr(model, "best_iteration", 0) or 0)
 
+    if model_name == "catboost":
+        X_train = prepare_frame_for_model(X_train, model_name, categorical_features)
+        X_eval = prepare_frame_for_model(X_eval, model_name, categorical_features)
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=(X_eval, y_eval),
+            cat_features=categorical_features,
+            use_best_model=True,
+            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+            verbose=False,
+        )
+        return int(model.get_best_iteration() or 0)
+
     raise ValueError(f"{model_name!r} does not support early stopping here")
 
 
@@ -272,6 +355,10 @@ def build_model(
         )
     if name == "xgboost":
         return make_xgboost(
+            seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides
+        )
+    if name == "catboost":
+        return make_catboost(
             seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides
         )
     if name == "random_forest":
