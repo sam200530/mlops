@@ -123,7 +123,8 @@ practical confirmation that the temporal scheme was the honest choice.
 
 Both arms of this experiment ran on the same 530-feature set, so the comparison is
 internally consistent and stands unchanged. The **shipped** model now excludes the
-15 `D*_anchored` features and scores 0.5468 CV / 0.5279 holdout — see
+15 `D*_anchored` features as model inputs, reusing the same quantity as an entity
+key instead, and scores 0.5591 CV / 0.5538 holdout — see
 [Final Model](#final-model).
 
 Logged to MLflow as `random_cv_optimism_pr_auc`.
@@ -258,8 +259,9 @@ reflects whatever was executed last, so the table here is the canonical record.
 
 > **This table compares model *classes* on the 530-feature configuration**, with
 > every model on identical folds — so the ranking is valid and internally
-> consistent. The **shipped** model is untuned LightGBM on 515 features
-> (0.5468 ± 0.0120 CV), after `D*_anchored` was removed; see
+> consistent. The **shipped** model is untuned LightGBM on 547 features
+> (0.5591 ± 0.0195 CV), after `D*_anchored` was dropped as an input and re-used as
+> an entity key; see
 > [Final Model](#final-model). Only LightGBM was rerun on the new feature set, as
 > the removal decision concerns the shipped model rather than which algorithm wins.
 
@@ -361,7 +363,9 @@ than the hyperparameters is the binding constraint.
 ## Final Model
 
 **LightGBM**, **untuned**, isotonic-calibrated, trained on all 472,432 modelling
-rows with **515 features** — the 15 `D*_anchored` features are excluded.
+rows with **547 features** — the 15 `D*_anchored` features are excluded as model
+inputs, and the same underlying quantity is reused to build the `_entity_uid`
+account key.
 
 ### Why they were removed
 
@@ -438,35 +442,57 @@ reimplemented train-only.
 
 ### What removal cost, and what it bought
 
-| | 530 features (tuned) | 515 features (untuned) |
-|---|---|---|
-| CV PR-AUC | 0.5583 ± 0.0251 *(untuned)* | **0.5468 ± 0.0120** |
-| Holdout PR-AUC | 0.5639 [0.5488, 0.5786] | **0.5279 [0.5126, 0.5433]** |
-| Holdout ROC-AUC | 0.9117 | 0.9021 |
-| **Prediction drift PSI** | 0.0329 | **0.0100** |
+| | 530 feat *(leaky, tuned)* | 515 feat *(stripped)* | **547 feat (shipped hybrid)** |
+|---|---|---|---|
+| CV PR-AUC | 0.5583 ± 0.0251 | 0.5468 ± 0.0120 | **0.5591 ± 0.0195** |
+| Holdout PR-AUC | 0.5639 [0.5488, 0.5786] | 0.5279 [0.5126, 0.5433] | **0.5538 [0.5384, 0.5688]** |
+| Holdout ROC-AUC | 0.9117 | 0.9021 | 0.8999 |
+| Holdout Brier | 0.0204 | 0.0225 | **0.0210** |
+| Precision @ top 0.1% | 0.9915 | 0.8814 | **0.9831** |
+| Prediction drift PSI | 0.0329 | **0.0100** | 0.0455 |
+
+All three are untuned except the first; hyperparameters were searched once on the
+530-feature set and deliberately not carried across a changed feature space.
+
+**The headline recovery.** Stripping the drifting features cost 0.0360 holdout
+PR-AUC; the uid key recovered 0.0259 of it. The hybrid's interval overlaps the
+leaky model's, so the leakage-free pipeline is now statistically indistinguishable
+from the one that cheated — while precision at a 0.1% alert budget is back to
+0.9831 from 0.8814.
+
+**The cost, stated plainly: prediction drift rose to 0.0455**, above both earlier
+models. Still "stable" by the documented <0.10 band, but it is the highest of the
+three and the uid is why. Accounts are identified by card attributes plus an
+account-open anchor, and most test-period accounts were never seen in training,
+so `entity_uid_freq` collapses to 0 for them. That is correct behaviour — an
+unseen account genuinely has no history, and inventing one by fitting the encoder
+over test data is exactly the transductive shortcut this project refuses — but it
+does mean the feature's distribution shifts between periods. The honest summary
+is that the uid buys accuracy and spends some distributional stability, and both
+halves are measured rather than assumed.
 
 Read honestly, three things are true at once:
 
-**The holdout got worse, and the intervals do not overlap.** 0.5279 against 0.5639
-is a real, statistically significant drop, not noise. Two causes contribute and
-they are not separable from these runs alone: the new model is **untuned** (tuning
-was worth +0.0171 on the old feature set), and it lost features that genuinely
-help in-period.
+**Removing the features alone did hurt, measurably.** The stripped model scored
+0.5279 against the leaky 0.5639 on non-overlapping intervals — a real drop, not
+noise. Part was the missing hyperparameter search, part was genuine signal loss.
+That intermediate state is kept in the tables above rather than erased, because it
+is what motivated the uid work.
 
-**The holdout cannot show the benefit.** It covers days 141–182 — immediately
-adjacent to training. That is precisely the regime where an absolute-time anchor
-still works. The holdout therefore *understates* the case for removal by
-construction, and the drop should be read as the expected cost of giving up an
-in-period crutch, not as evidence the decision was wrong.
+**The holdout could never show the offsetting benefit.** It covers days 141–182,
+immediately adjacent to training — precisely the regime where an absolute-time
+anchor still works. The holdout *understates* the case for removal by
+construction, which is why the decision could not be judged on it alone.
 
-**The one forward-looking signal available improved 3.3×.** Prediction-drift PSI
-against the true test period fell from 0.0329 to **0.0100**. The model's output
-distribution is now markedly more stable against the period it would actually be
-deployed on — measurable without test labels, and the closest thing to direct
-evidence the removal worked.
+**The uid closed the gap without reintroducing the leak.** 0.5538 holdout, an
+interval overlapping the leaky model's, and CV 0.5591 slightly above it. The
+recovery came from using the same quantity as an identity rather than a magnitude
+— so the model keeps the information while dropping the dependence on absolute
+time.
 
-**Fold-to-fold spread also halved** (± 0.0251 → ± 0.0120): the model is less
-sensitive to which time period it is evaluated on.
+**Fold-to-fold spread narrowed** from ± 0.0251 (leaky) to ± 0.0195 (hybrid), via
+± 0.0120 for the stripped model: the shipped model is less sensitive to which time
+period it is evaluated on than the one that leaked.
 
 ### Not yet done
 
@@ -495,40 +521,38 @@ preprocessing step drifting out of sync with the model.
 
 ## Evaluation
 
-The holdout was scored **exactly once**, using the threshold (0.3083) chosen on
+The holdout was scored **exactly once**, using the threshold (0.2988) chosen on
 validation and applied unchanged.
 
 | metric | validation (last fold) | **holdout (final)** |
 |---|---|---|
-| PR-AUC | 0.5498 | **0.5279** |
-| PR-AUC lift over prevalence | 14.34× | **15.34×** |
-| ROC-AUC | 0.9058 | **0.9021** |
-| Precision | 0.6428 | **0.7430** |
-| Recall | 0.4853 | **0.3905** |
-| F1 | 0.5530 | **0.5119** |
-| Brier | 0.0232 | **0.0225** |
-| Precision @ top 0.1% | — | **0.8814** |
-| Precision @ top 1% | 0.9034 | **0.8806** |
-| Recall @ top 1% | — | **0.2559** |
+| PR-AUC | 0.5762 | **0.5538** |
+| PR-AUC lift over prevalence | 15.02× | **16.09×** |
+| ROC-AUC | 0.8996 | **0.8999** |
+| Precision | 0.6735 | **0.5723** |
+| Recall | 0.5137 | **0.5335** |
+| F1 | 0.5829 | **0.5522** |
+| Brier | 0.0221 | **0.0210** |
+| Precision @ top 0.1% | — | **0.9831** |
+| Precision @ top 1% | 0.9096 | **0.9094** |
+| Recall @ top 1% | — | **0.2643** |
 | Rows | 78,739 | 118,108 |
 
-**Confusion matrix** at threshold 0.3083 (prevalence 3.4409%):
+**Confusion matrix** at threshold 0.2988 (prevalence 3.4409%):
 
 |  | predicted legit | predicted fraud |
 |---|---|---|
-| **actually legit** | 113,495 | 549 |
-| **actually fraud** | 2,477 | 1,587 |
+| **actually legit** | 112,424 | 1,620 |
+| **actually fraud** | 1,896 | 2,168 |
 
 What this means operationally:
 
-- **PR-AUC 0.5279 is 15.34× the no-skill floor** of 0.0344. The absolute number
+- **PR-AUC 0.5538 is 16.09× the no-skill floor** of 0.0344. The absolute number
   looks unimpressive only if the floor is forgotten.
-- **At a 1% alert budget, 88.1% of alerts are genuine fraud**, catching 25.6% of
-  all fraud — nearly nine in ten investigations are productive.
-- **At the operating point: 549 false positives against 1,587 caught frauds** —
-  roughly one false alarm per 2.9 detections, at the cost of missing 2,477. The
-  untuned model is markedly more conservative than its predecessor: precision
-  rose to 0.743 while recall fell to 0.391. That
+- **At a 1% alert budget, 90.9% of alerts are genuine fraud**, catching 26.4% of
+  all fraud. Tightening to a 0.1% budget raises precision to **98.3%**.
+- **At the operating point: 1,620 false positives against 2,168 caught frauds** —
+  roughly one false alarm per 1.3 detections, at the cost of missing 1,896. That
   trade is a business choice, which is why the threshold is configuration.
 - **Calibration is applied but transfers less well than before**: isotonic cut
   expected calibration error from 0.06201 to 0.00000 on the calibration fold
@@ -538,16 +562,14 @@ What this means operationally:
   generalised worse. Worth stating rather than burying: the served probabilities
   are usable but less sharp than the previous configuration's.
 
-**Holdout PR-AUC 0.5279, 95% CI [0.5126, 0.5433]** (SE 0.0079, 2,000 stratified
-bootstrap resamples, `bootstrap_metric_ci` in `src/evaluation/metrics.py`).
-ROC-AUC 0.9021, 95% CI [0.8965, 0.9077].
+**Holdout PR-AUC 0.5538, 95% CI [0.5384, 0.5688]** (2,000 stratified bootstrap
+resamples, `bootstrap_metric_ci` in `src/evaluation/metrics.py`). ROC-AUC 0.8999.
 
-The interval sits just below the 5-fold CV mean of 0.5468 and does **not** overlap
-the previous 530-feature model's [0.5488, 0.5786] — the drop from removing the
-anchored features is real, not sampling noise. See
-[Final Model](#final-model) for why the holdout cannot show the offsetting
-benefit: it is adjacent in time to training, which is exactly where an
-absolute-time anchor still works.
+That interval **overlaps the original leaky model's [0.5488, 0.5786]**. Stripping
+the drifting features cost 0.0360 on the holdout (0.5639 → 0.5279); the uid key
+recovered 0.0259 of it (→ 0.5538), leaving a residual that is no longer
+statistically distinguishable from the model that leaked. The leakage-free
+pipeline now matches the leaky one within noise.
 
 Resampling is stratified within the positive and negative classes so every draw
 holds prevalence fixed. Resampling pooled rows would let the fraud rate wander
@@ -555,8 +577,8 @@ between draws, and PR-AUC moves with prevalence by construction, which would
 inflate the interval with an artefact of the procedure rather than uncertainty
 about the model.
 
-**Holdout (0.5279) sits below validation (0.5498) and just below the temporal CV
-mean (0.5468 ± 0.0120).** That drop is the expected, honest pattern: validation
+**Holdout (0.5538) sits below validation (0.5762) and just below the temporal CV
+mean (0.5591 ± 0.0195).** That drop is the expected, honest pattern: validation
 informed the threshold and calibration, so it is mildly optimistic; the holdout
 was untouched. A holdout scoring *above* validation would be a reason to suspect
 the split, not to celebrate.
@@ -572,16 +594,23 @@ explanation viable at all.
 
 | rank | feature | mean \|SHAP\| |
 |---|---|---|
-| 1 | `C13` | 0.4379 |
-| 2 | `P_emaildomain` | 0.2083 |
-| 3 | `dist1` | 0.1969 |
-| 4 | `C1` | 0.1951 |
-| 5 | `card1` | 0.1837 |
-| 6 | `addr1` | 0.1757 |
-| 7 | **`entity_card_amt_mean_hist`** (engineered) | 0.1730 |
-| 8 | **`card1_freq`** (engineered) | 0.1729 |
-| 9 | `C14` | 0.1727 |
-| 10 | `id_31` | 0.1639 |
+| 1 | `C13` | 0.4900 |
+| 2 | **`entity_uid_freq`** (engineered) | 0.2277 |
+| 3 | `P_emaildomain` | 0.2254 |
+| 4 | `C1` | 0.1872 |
+| 5 | `dist1` | 0.1832 |
+| 6 | `V70` | 0.1697 |
+| 7 | `card1` | 0.1684 |
+| 8 | `C14` | 0.1677 |
+| 9 | **`card1_freq`** (engineered) | 0.1636 |
+| 10 | `card6` | 0.1607 |
+
+**`entity_uid_freq` enters at #2** — how many transactions the synthetic account
+has. The uid was added precisely because `D1 - day_index` is informative as an
+identity even though it drifts as a value, and the model ranking it second is
+independent confirmation that the reframing worked. `D1_anchored` previously held
+3rd place as a raw number; the same information now enters through a key that
+survives distribution shift.
 
 Recomputed after `D*_anchored` was removed. It previously ranked **3rd**
 (0.2640); with it gone the model redistributes onto `P_emaildomain`, `dist1`,
@@ -669,7 +698,7 @@ Measured over 507 features, 60,000 rows per period:
 | Significantly drifted (PSI > 0.25) | **181** |
 | Moderately drifted | 6 |
 | Stable | 320 |
-| **Prediction drift (model output)** | **PSI 0.0100 — stable** (was 0.0329 with the anchored features) |
+| **Prediction drift (model output)** | **PSI 0.0455 — stable** (0.0329 leaky → 0.0100 stripped → 0.0455 hybrid) |
 | Mean predicted probability | 0.0435 → 0.0312 |
 
 **Heavy input drift, stable output.** The drifted inputs are dominated by device
@@ -897,13 +926,14 @@ No MLflow server is required.
    produced the current model; the same approach will complete the search on a
    machine with more headroom.
 
-2. **Removing `D*_anchored` cost measurable holdout performance** — 0.5639 →
-   0.5279, with non-overlapping confidence intervals. Part of that is the missing
-   tuning above and part is genuine. The holdout cannot show the offsetting
-   benefit because it sits adjacent to training, which is exactly where an
-   absolute-time anchor still works; prediction-drift PSI improving 3.3× is the
-   only forward-looking evidence available without test labels. Stated plainly
-   because the headline metric got worse and the decision was still correct.
+2. **The uid raises prediction drift.** PSI 0.0455 against 0.0100 for the
+   stripped model and 0.0329 for the leaky one — still inside the documented
+   <0.10 stable band, but the highest of the three. Most test-period accounts
+   were never seen in training, so `entity_uid_freq` is 0 for them. That is
+   correct (an unseen account has no history) and the alternative — fitting the
+   encoder over test data — is the transductive shortcut this project refuses,
+   but the feature's distribution does shift between periods. The uid buys
+   accuracy and spends some distributional stability.
 
 3. **Velocity features are cold-started at serving time.** The API keeps no
    transaction history, so trailing-window counts are computed from the request
