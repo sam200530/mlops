@@ -6,6 +6,11 @@ comparison is only meaningful if each is configured the way it is claimed to be.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -113,3 +118,46 @@ class TestEarlyStopping:
         assert np.isnan(filled["num"].iloc[1]), "numeric NaN must stay for native routing"
         for other in ("lightgbm", "xgboost"):
             assert prepare_frame_for_model(frame, other, ["cat"]) is frame
+
+
+class TestOptionalDependencies:
+    """CatBoost must stay optional.
+
+    It is a ~329 MB benchmarking-only dependency that lost the model comparison,
+    so it is in requirements-dev.txt rather than requirements.txt and the serving
+    image never installs it. A module-scope import would therefore break every
+    import of src.models.estimators in production and in CI -- which is exactly
+    what happened once.
+    """
+
+    def test_estimators_imports_without_catboost(self) -> None:
+        code = textwrap.dedent(
+            """
+            import builtins, sys
+            _real = builtins.__import__
+
+            def _blocked(name, *args, **kwargs):
+                if name == "catboost" or name.startswith("catboost."):
+                    raise ImportError("simulated: catboost not installed")
+                return _real(name, *args, **kwargs)
+
+            builtins.__import__ = _blocked
+            from src.models.estimators import build_model
+            assert build_model("lightgbm", seed=1, n_jobs=1) is not None
+            try:
+                build_model("catboost", seed=1)
+            except ImportError as exc:
+                assert "requirements-dev.txt" in str(exc)
+            else:
+                raise AssertionError("expected a helpful ImportError")
+            print("OK")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parents[1],
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout

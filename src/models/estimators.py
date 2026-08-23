@@ -31,7 +31,6 @@ from typing import Any, Literal
 import lightgbm as lgb
 import numpy as np
 import xgboost as xgb
-from catboost import CatBoostClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
@@ -262,8 +261,23 @@ def make_catboost(
     n_jobs: int = -1,
     imbalance_weight: float | None = None,
     **overrides: Any,
-) -> CatBoostClassifier:
-    """CatBoost classifier with this project's defaults."""
+) -> Any:
+    """CatBoost classifier with this project's defaults.
+
+    CatBoost is imported here rather than at module scope because it is a
+    329 MB dependency used only to benchmark a model that lost the comparison.
+    The serving path never constructs one, so importing it eagerly would put
+    a third of a gigabyte into the Docker image to support a code path
+    production never takes. It lives in requirements-dev.txt accordingly.
+    """
+    try:
+        from catboost import CatBoostClassifier
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise ImportError(
+            "CatBoost is not installed. It is a benchmarking-only dependency: "
+            "install it with `pip install -r requirements-dev.txt`."
+        ) from exc
+
     return CatBoostClassifier(
         **catboost_params(seed=seed, n_jobs=n_jobs, imbalance_weight=imbalance_weight, **overrides)
     )
