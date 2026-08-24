@@ -76,7 +76,8 @@ desktop.ini
 # Generated Kaggle submission (15 MB, reproducible via kaggle/make_submission.py)
 kaggle/submission.csv
 
-# Interview prep document (generated; regenerate with build_prep_pdf.py)
+# Personal study material -- not part of the project. Kept in ../mlops-study/
 Fraud_Detection_MLOps_Interview_Prep.pdf
+build_*_pdf.py
 Fraud_Detection_MLOps_Pipeline_Walkthrough.pdf
 Fraud_Detection_Explained_From_Zero.pdf
