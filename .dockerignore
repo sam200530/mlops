@@ -32,9 +32,6 @@ htmlcov/
 *.parquet
 *.csv
 *.pkl
-# ...except the shipped artifact, which Dockerfile.deploy bakes in for hosts
-# with no persistent volume. The main Dockerfile mounts it and ignores this.
-!models/model_artifact.pkl
 *.db
 
 README.md
