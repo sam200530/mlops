@@ -105,9 +105,9 @@
 </div>
 
 <script>
-// Set this to your Render URL after the backend deploys, e.g.
-// const API = "https://fraud-api.onrender.com";
-const API = "http://localhost:8000";
+// Live backend. Override for local work by running the API on :8000 and
+// changing this line.
+const API = "https://mlops-xiq7.onrender.com";
 
 const $ = id => document.getElementById(id);
 const num = v => (v === "" || v === null ? null : Number(v));
