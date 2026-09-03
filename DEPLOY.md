@@ -63,7 +63,18 @@ Cloud Run injects `$PORT`, which `Dockerfile.deploy` already honours. For a real
 deployment, keep the artifact out of the image: push it to a bucket and mount it
 with Cloud Storage FUSE, which restores the retrain-without-rebuild property.
 
-## Local check before deploying anywhere
+## You do not need Docker installed
+
+The host builds the image from `Dockerfile.deploy`; nothing is built on your
+machine. Hugging Face Spaces builds on push, Cloud Run builds via Cloud Build,
+and this project's GitHub Actions workflow has been building the image on every
+push already. Docker Engine and the image format are open source and free; only
+Docker Desktop has a paid tier, and it is free for personal, educational and
+small-company use in any case.
+
+## Optional local check (only if you have Docker)
+
+Skip this entirely if you do not. The hosted build is the same build.
 
 ```bash
 docker build -f Dockerfile.deploy -t fraud-api .
