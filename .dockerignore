@@ -32,8 +32,6 @@ htmlcov/
 *.parquet
 *.csv
 *.pkl
-# Dockerfile.render bakes the artifact in; the main Dockerfile mounts it.
-!models/model_artifact.pkl
 *.db
 
 README.md

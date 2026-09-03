@@ -1,8 +1,12 @@
 # Serving image for hosts with no persistent volume (Render, Cloud Run).
 #
-# Identical to Dockerfile except the model artifact is copied in rather than
-# mounted, and the port comes from $PORT. Retraining therefore needs an image
-# rebuild -- the cost of running somewhere that gives you no writable disk.
+# Differs from the main Dockerfile in two ways: the port comes from $PORT, and
+# the model artifact is fetched at build time instead of mounted at runtime.
+#
+# The artifact is NOT in the repository -- .gitignore excludes model weights on
+# purpose -- and a hosted builder gets a fresh clone, so there is nothing to
+# COPY. Upload models/model_artifact.pkl as a GitHub Release asset and pass its
+# URL as the MODEL_URL build argument.
 
 FROM python:3.12-slim AS builder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -25,7 +29,12 @@ RUN pip install --no-index --find-links=/wheels -r requirements.txt && rm -rf /w
 COPY src/ ./src/
 COPY api/ ./api/
 COPY configs/ ./configs/
-COPY models/model_artifact.pkl ./models/model_artifact.pkl
+
+ARG MODEL_URL
+RUN test -n "$MODEL_URL" || { echo "ERROR: MODEL_URL build argument is required"; exit 1; }
+RUN mkdir -p models \
+    && curl -fsSL "$MODEL_URL" -o models/model_artifact.pkl \
+    && python -c "import pathlib,sys; n=pathlib.Path('models/model_artifact.pkl').stat().st_size; print(f'artifact {n/1048576:.1f} MB'); sys.exit(0 if n > 1_000_000 else 1)"
 
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
