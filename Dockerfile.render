@@ -5,8 +5,8 @@
 #
 # The artifact is NOT in the repository -- .gitignore excludes model weights on
 # purpose -- and a hosted builder gets a fresh clone, so there is nothing to
-# COPY. Upload models/model_artifact.pkl as a GitHub Release asset and pass its
-# URL as the MODEL_URL build argument.
+# COPY. Upload models/model_artifact.pkl as a GitHub Release asset and set
+# MODEL_URL to its download URL in the service's environment variables.
 
 FROM python:3.12-slim AS builder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -30,13 +30,13 @@ COPY src/ ./src/
 COPY api/ ./api/
 COPY configs/ ./configs/
 
-ARG MODEL_URL
-RUN test -n "$MODEL_URL" || { echo "ERROR: MODEL_URL build argument is required"; exit 1; }
-RUN mkdir -p models \
-    && curl -fsSL "$MODEL_URL" -o models/model_artifact.pkl \
-    && python -c "import pathlib,sys; n=pathlib.Path('models/model_artifact.pkl').stat().st_size; print(f'artifact {n/1048576:.1f} MB'); sys.exit(0 if n > 1_000_000 else 1)"
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && mkdir -p /app/models
 
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
-CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
+
+# The artifact is fetched at startup, not at build time, so a new model is a
+# restart rather than a rebuild. MODEL_URL is an ordinary environment variable.
+ENTRYPOINT ["/app/entrypoint.sh"]
