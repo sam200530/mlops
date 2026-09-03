@@ -520,8 +520,15 @@ informed the threshold and calibration, so it is mildly optimistic; the holdout
 was untouched. A holdout scoring *above* validation would be a reason to suspect
 the split, not to celebrate.
 
-Figures in `reports/figures/`: PR curve with the prevalence baseline drawn on it,
-ROC, reliability diagram, confusion matrix, per-class score distribution.
+![Precision-recall on the holdout](docs/images/holdout_precision_recall.png)
+
+The prevalence baseline is drawn on the curve, because a PR curve without it
+invites the reader to judge 0.5538 against 1.0 rather than against 0.0344.
+
+Regenerate with `python scripts/evaluate.py --partition holdout`, which also
+writes the ROC, reliability diagram, confusion matrix and per-class score
+distribution to `reports/figures/`. Copies of all five, plus the two SHAP plots,
+are committed under `docs/images/`.
 
 ## SHAP Explainability
 
@@ -541,6 +548,8 @@ explanation viable at all.
 | 8 | `C14` | 0.1677 |
 | 9 | **`card1_freq`** (engineered) | 0.1636 |
 | 10 | `card6` | 0.1607 |
+
+![Mean absolute SHAP by feature](docs/images/shap_importance.png)
 
 **`entity_uid_freq` enters at #2** — how many transactions the synthetic account
 has. The uid was added precisely because `D1 - day_index` is informative as an
