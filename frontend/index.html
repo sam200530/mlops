@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fraud Detection - IEEE-CIS</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1a1a1a; --muted:#5b6470;
+    --accent:#0b5fa5; --line:#dfe3e8; --ok:#2e7d44; --warn:#c0392b;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#14171c; --card:#1c2128; --ink:#e6e9ee; --muted:#9aa4b2;
+           --accent:#5aa9f0; --line:#2b323b; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:940px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{color:var(--muted);margin:0 0 22px}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:26px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:8px;
+        padding:10px 14px;min-width:132px}
+  .stat b{display:block;font-size:19px;color:var(--accent)}
+  .stat span{font-size:12px;color:var(--muted)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  @media (max-width:760px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+  input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:6px;
+               background:transparent;color:var(--ink);font-size:14px}
+  button{width:100%;margin-top:20px;padding:12px;border:0;border-radius:7px;
+         background:var(--accent);color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .gauge{height:10px;background:var(--line);border-radius:5px;overflow:hidden;margin:14px 0 6px}
+  .gauge>i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
+  .verdict{font-size:22px;font-weight:700;margin:4px 0}
+  .allow{color:var(--ok)} .flag{color:var(--warn)}
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}
+  td{padding:5px 0;border-bottom:1px solid var(--line)}
+  td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+  .muted{color:var(--muted);font-size:13px}
+  .note{margin-top:20px;padding:12px 14px;border-left:3px solid var(--accent);
+        background:var(--card);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted)}
+  a{color:var(--accent)}
+  code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Fraud Detection &mdash; IEEE-CIS</h1>
+  <p class="sub">LightGBM, 547 features, served by FastAPI. Scored through the
+     same pipeline used in training, so what you see here is the shipped model.</p>
+
+  <div class="stats">
+    <div class="stat"><b>0.5538</b><span>holdout PR-AUC</span></div>
+    <div class="stat"><b>16.09&times;</b><span>the 3.44% floor</span></div>
+    <div class="stat"><b>98.3%</b><span>precision @ 0.1% budget</span></div>
+    <div class="stat"><b>+0.2929</b><span>optimism random CV hid</span></div>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <strong>Transaction</strong>
+      <label>Amount</label>
+      <input id="amt" type="number" value="250" min="0.01" step="0.01">
+      <label>Product code</label>
+      <select id="pcd"><option>W</option><option>C</option><option>R</option>
+        <option>H</option><option>S</option></select>
+      <label>Card network</label>
+      <select id="c4"><option>visa</option><option>mastercard</option>
+        <option>american express</option><option>discover</option></select>
+      <label>Card type</label>
+      <select id="c6"><option>debit</option><option>credit</option></select>
+      <label>Issuer id (card1)</label>
+      <input id="c1" type="number" value="13926">
+      <label>Billing region (addr1)</label>
+      <input id="a1" type="number" value="315">
+      <label>Email domain</label>
+      <select id="em"><option>gmail.com</option><option>yahoo.com</option>
+        <option>hotmail.com</option><option>anonymous.com</option></select>
+      <label>Device</label>
+      <select id="dev"><option>desktop</option><option>mobile</option></select>
+      <button id="go">Score transaction</button>
+    </div>
+
+    <div class="card">
+      <strong>Result</strong>
+      <div id="out" class="muted" style="margin-top:14px">Submit a transaction to score it.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Why the score may look low.</b> Velocity features count how often a card
+    was used recently, and a one-off request has no history &mdash; so they come
+    back as zero rather than being invented. The batch API produces stronger
+    signals. The backend also sleeps when idle, so the first request after a
+    quiet spell can take up to a minute to wake.
+    <br><br>
+    <a href="https://github.com/sam200530/mlops">Source and full write-up on GitHub</a>
+  </div>
+
+</div>
+
+<script>
+// Set this to your Render URL after the backend deploys, e.g.
+// const API = "https://fraud-api.onrender.com";
+const API = "http://localhost:8000";
+
+const $ = id => document.getElementById(id);
+const num = v => (v === "" || v === null ? null : Number(v));
+
+$("go").onclick = async () => {
+  const btn = $("go"), out = $("out");
+  btn.disabled = true;
+  out.className = "muted";
+  out.textContent = "Scoring... (the backend may be waking up, up to ~60s)";
+
+  const body = {
+    transaction_amt: num($("amt").value),
+    product_cd: $("pcd").value,
+    card1: num($("c1").value),
+    card4: $("c4").value,
+    card6: $("c6").value,
+    addr1: num($("a1").value),
+    p_emaildomain: $("em").value,
+    device_type: $("dev").value
+  };
+
+  try {
+    const res = await fetch(API + "/predict", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 200));
+    render(await res.json());
+  } catch (e) {
+    out.className = "muted";
+    out.innerHTML = "<b>Request failed.</b><br>" + String(e.message || e) +
+      "<br><br>If this says <code>Failed to fetch</code>, the backend is asleep or " +
+      "<code>API</code> in this page still points at localhost.";
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+function render(d) {
+  const p = d.fraud_probability;
+  const flagged = d.flagged;
+  const pct = (p * 100).toFixed(2);
+
+  let rows = "";
+  for (const [k, v] of Object.entries(d)) {
+    if (typeof v === "object" && v !== null) continue;
+    rows += `<tr><td>${k}</td><td>${typeof v === "number" ? v.toFixed(4) : v}</td></tr>`;
+  }
+
+  $("out").className = "";
+  $("out").innerHTML =
+    `<div class="verdict ${flagged ? "flag" : "allow"}">` +
+    `${flagged ? "FLAG FOR REVIEW" : "ALLOW"}</div>` +
+    `<div class="muted">fraud probability ${pct}% &middot; risk ${d.risk_level} ` +
+    `&middot; threshold ${d.decision_threshold.toFixed(4)}</div>` +
+    `<div class="gauge"><i style="width:${Math.min(p * 100, 100)}%"></i></div>` +
+    `<table>${rows}</table>`;
+}
+</script>
+</body>
+</html>

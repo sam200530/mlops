@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.dependencies import load_artifact, state
@@ -63,6 +64,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+if get_settings().cors_allow_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_settings().cors_allow_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
 app.include_router(router)
 

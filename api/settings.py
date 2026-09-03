@@ -18,6 +18,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Runtime settings for the prediction service."""
 
+    #: Origins permitted to call the API from a browser. Empty by default, so
+    #: the service is same-origin only unless a deployment opts in -- a browser
+    #: silently blocks cross-origin calls otherwise, which is a confusing
+    #: failure to debug from the frontend side.
+    cors_allow_origins: list[str] = Field(default_factory=list)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", protected_namespaces=())
 
     log_level: str = "INFO"

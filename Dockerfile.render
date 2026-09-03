@@ -1,0 +1,33 @@
+# Serving image for hosts with no persistent volume (Render, Cloud Run).
+#
+# Identical to Dockerfile except the model artifact is copied in rather than
+# mounted, and the port comes from $PORT. Retraining therefore needs an image
+# rebuild -- the cost of running somewhere that gives you no writable disk.
+
+FROM python:3.12-slim AS builder
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libgomp1 && rm -rf /var/lib/apt/lists/*
+WORKDIR /wheels
+COPY requirements.txt .
+RUN pip wheel --wheel-dir /wheels -r requirements.txt
+
+FROM python:3.12-slim AS runtime
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
+    FRAUD_PROJECT_ROOT=/app PYTHONPATH=/app PORT=8000
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+COPY requirements.txt .
+RUN pip install --no-index --find-links=/wheels -r requirements.txt && rm -rf /wheels
+
+COPY src/ ./src/
+COPY api/ ./api/
+COPY configs/ ./configs/
+COPY models/model_artifact.pkl ./models/model_artifact.pkl
+
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+EXPOSE 8000
+CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
